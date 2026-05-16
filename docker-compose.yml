@@ -1,6 +1,6 @@
 services:
   steward:
-    image: ghcr.io/you/steward:latest
+    image: ${AGENT_IMAGE:-ghcr.io/asksven/steward:latest}
     container_name: steward
     restart: unless-stopped
     environment:
@@ -16,7 +16,7 @@ services:
 
       # Self-update — agent will restart itself when a new image is pushed
       AGENT_CONTAINER_NAME: steward
-      AGENT_IMAGE: ghcr.io/you/steward:latest
+      AGENT_IMAGE: ghcr.io/asksven/steward:latest
 
       # Private repo auth (choose one approach):
       # Option A: token inline (fine for homelab)

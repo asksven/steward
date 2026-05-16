@@ -64,15 +64,14 @@ See the companion **homelab-gitops** README for the control repo structure. Crea
 
 ### 3. Deploy the agent on a node
 
-Edit `docker-compose.yml` and set at minimum:
+Create a `.env` file next to `docker-compose.yml` with at minimum:
 
-```yaml
-environment:
-  CONTROL_REPO_URL: https://oauth2:<token>@github.com/you/homelab-gitops
-  GITOPS_NODE_NAME: node1.lan   # must match directory name in control repo
+```env
+CONTROL_REPO_URL=https://oauth2:<token>@github.com/you/homelab-gitops
+GITOPS_NODE_NAME=node1.lan
 ```
 
-Then:
+`GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo. Then:
 
 ```bash
 docker compose up -d
@@ -145,15 +144,17 @@ environment:
 
 ### SSH key
 
-Mount your key into the container:
+Create a `docker-compose.override.yml` next to `docker-compose.yml` on the node (do not edit the base file):
 
 ```yaml
-volumes:
-  - ~/.ssh/gitops_ed25519:/root/.ssh/id_ed25519:ro
-  - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+services:
+  steward:
+    volumes:
+      - ~/.ssh/gitops_ed25519:/root/.ssh/id_ed25519:ro
+      - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
 ```
 
-Use SSH URLs in your manifests:
+Docker Compose merges this automatically — no extra flags needed. Use SSH URLs in your manifests:
 
 ```yaml
 repo: git@github.com:you/arr-stack.git
