@@ -6,6 +6,9 @@ echo "  Node:         ${GITOPS_NODE_NAME:-$(hostname)}"
 echo "  Control repo: ${CONTROL_REPO_URL}"
 echo "  Gitops root:  ${GITOPS_ROOT:-~/git}"
 
+# Fix SSH key and config permissions if mounted (SSH requires 600)
+chmod 600 /root/.ssh/id_* /root/.ssh/config 2>/dev/null || true
+
 # Ensure git root directories exist
 mkdir -p "${GITOPS_ROOT:-$HOME/git}/stacks"
 

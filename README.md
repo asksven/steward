@@ -144,17 +144,32 @@ environment:
 
 ### SSH key
 
-Create a `docker-compose.override.yml` next to `docker-compose.yml` on the node (do not edit the base file):
+Create an SSH config file on the host that maps each Git host to its key:
+
+```
+# ~/.ssh/config
+Host gitlab.com
+  IdentityFile ~/.ssh/id_rsa-gitlab
+  StrictHostKeyChecking yes
+
+Host github.com
+  IdentityFile ~/.ssh/id_rsa-github
+  StrictHostKeyChecking yes
+```
+
+Then create a `docker-compose.override.yml` next to `docker-compose.yml` on the node mounting all keys, the config, and `known_hosts`:
 
 ```yaml
 services:
   steward:
     volumes:
-      - ~/.ssh/gitops_ed25519:/root/.ssh/id_ed25519:ro
+      - ~/.ssh/id_rsa-gitlab:/root/.ssh/id_rsa-gitlab:ro
+      - ~/.ssh/id_rsa-github:/root/.ssh/id_rsa-github:ro
+      - ~/.ssh/config:/root/.ssh/config:ro
       - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
 ```
 
-Docker Compose merges this automatically — no extra flags needed. Use SSH URLs in your manifests:
+Docker Compose merges this automatically — no extra flags needed. The entrypoint fixes key permissions automatically on startup. Use SSH URLs in your manifests:
 
 ```yaml
 repo: git@github.com:you/arr-stack.git
