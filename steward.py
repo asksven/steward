@@ -4,6 +4,7 @@ steward
 Watches a control repo for app manifests and reconciles docker compose stacks.
 """
 
+import json
 import logging
 import os
 import socket
@@ -20,13 +21,79 @@ from git import Repo, GitCommandError, InvalidGitRepositoryError
 # Logging
 # ---------------------------------------------------------------------------
 
+_log_level = getattr(logging, os.environ.get("LOGLEVEL", "INFO").upper(), logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
+    level=_log_level,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
     stream=sys.stdout,
 )
 log = logging.getLogger("steward")
+
+# ---------------------------------------------------------------------------
+# Path helpers (inside ↔ outside)
+# ---------------------------------------------------------------------------
+
+def _container_mounts() -> list[dict]:
+    """Return the Mounts list from docker inspect on this container, or []."""
+    container_name = os.environ.get("AGENT_CONTAINER_NAME")
+    if not container_name:
+        return []
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Mounts}}", container_name],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return json.loads(result.stdout) or []
+    except Exception:
+        pass
+    return []
+
+
+def host_path(container_path: Path) -> str:
+    """
+    Resolve a container path to its host-side source by inspecting mounts.
+    Returns a human-readable string; never raises.
+    """
+    mounts = _container_mounts()
+    if not mounts:
+        return "<host path unknown: set AGENT_CONTAINER_NAME>"
+
+    best: dict = {}
+    best_len = 0
+    for mount in mounts:
+        dest = mount.get("Destination", "")
+        if str(container_path).startswith(dest) and len(dest) > best_len:
+            best = mount
+            best_len = len(dest)
+
+    if not best:
+        return "<not mounted>"
+
+    rel = str(container_path)[best_len:].lstrip("/")
+    source = best.get("Source", "")
+    name = best.get("Name", "")
+    outside = source + ("/" + rel if rel else "")
+    if name:
+        return f"{outside}  [volume: {name}]"
+    return outside
+
+
+def log_mounts() -> None:
+    """Log all container mounts at DEBUG level."""
+    mounts = _container_mounts()
+    if not mounts:
+        log.debug("Mount map unavailable (AGENT_CONTAINER_NAME not set or docker inspect failed)")
+        return
+    log.debug("Container mount map:")
+    for m in mounts:
+        mtype = m.get("Type", "?")
+        src = m.get("Source") or m.get("Name", "?")
+        dst = m.get("Destination", "?")
+        mode = m.get("Mode", "")
+        log.debug("  [%s] %s → %s  (%s)", mtype, src, dst, mode)
+
 
 # ---------------------------------------------------------------------------
 # Configuration (from environment)
@@ -218,6 +285,8 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
     Returns True on success, False on failure.
     """
     compose_file = stack_path / app.path / app.compose_file
+    log.debug("App '%s' | inside  compose_file: %s", app.name, compose_file)
+    log.debug("App '%s' | outside compose_file: %s", app.name, host_path(compose_file))
 
     if not compose_file.exists():
         log.error("Compose file not found: %s", compose_file)
@@ -234,8 +303,13 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
     env = os.environ.copy()
     if app.env_file:
         env_path = Path(app.env_file)
+        log.debug("App '%s' | inside  env_file: %s", app.name, env_path)
+        log.debug("App '%s' | outside env_file: %s", app.name, host_path(env_path))
         if not env_path.exists():
-            log.error("env_file %s not found for app %s", app.env_file, app.name)
+            log.error(
+                "env_file not found for app '%s' | inside: %s | outside: %s",
+                app.name, env_path, host_path(env_path),
+            )
             return False
         cmd.extend(["--env-file", str(env_path)])
 
@@ -369,6 +443,8 @@ def reconcile_app(app: AppManifest) -> bool:
     Clones stack repo if needed, syncs, runs compose if changed.
     """
     stack_path = STACKS_DIR / app.name
+    log.debug("App '%s' | inside  stack_path: %s", app.name, stack_path)
+    log.debug("App '%s' | outside stack_path: %s", app.name, host_path(stack_path))
 
     # Ensure stack repo is cloned
     try:
@@ -415,6 +491,13 @@ def reconcile(mode: str = "reconcile") -> int:
         GITOPS_NODE_NAME,
         GITOPS_ROOT,
     )
+    log.debug("inside  GITOPS_ROOT    : %s", GITOPS_ROOT)
+    log.debug("outside GITOPS_ROOT    : %s", host_path(GITOPS_ROOT))
+    log.debug("inside  CONTROL_REPO   : %s", CONTROL_REPO_DIR)
+    log.debug("outside CONTROL_REPO   : %s", host_path(CONTROL_REPO_DIR))
+    log.debug("inside  STACKS_DIR     : %s", STACKS_DIR)
+    log.debug("outside STACKS_DIR     : %s", host_path(STACKS_DIR))
+    log_mounts()
 
     # Step 1: sync control repo
     try:

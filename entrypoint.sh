@@ -6,8 +6,15 @@ echo "  Node:         ${GITOPS_NODE_NAME:-$(hostname)}"
 echo "  Control repo: ${CONTROL_REPO_URL}"
 echo "  Gitops root:  ${GITOPS_ROOT:-~/git}"
 
-# Fix SSH key and config permissions if mounted (SSH requires 600)
-chmod 600 /root/.ssh/id_* /root/.ssh/config 2>/dev/null || true
+# Copy SSH credentials from staging mount to writable dir with correct root ownership
+# (bind-mounted files retain host UID; SSH rejects keys/config not owned by the running user)
+if [ -d /root/.ssh-host ] && ls /root/.ssh-host/* >/dev/null 2>&1; then
+  rm -rf /root/.ssh
+  mkdir -p /root/.ssh
+  cp /root/.ssh-host/* /root/.ssh/
+  chmod 700 /root/.ssh
+  chmod 600 /root/.ssh/*
+fi
 
 # Ensure git root directories exist
 mkdir -p "${GITOPS_ROOT:-$HOME/git}/stacks"

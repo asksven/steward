@@ -157,19 +157,32 @@ Host github.com
   StrictHostKeyChecking yes
 ```
 
-Then create a `docker-compose.override.yml` next to `docker-compose.yml` on the node mounting all keys, the config, and `known_hosts`:
+Create a container-specific SSH config on the host referencing the container paths (not `~/.ssh/`):
+
+```
+# ~/steward-ssh-config
+Host gitlab.com
+  IdentityFile /root/.ssh/id_rsa-gitlab
+  StrictHostKeyChecking yes
+
+Host github.com
+  IdentityFile /root/.ssh/id_rsa-github
+  StrictHostKeyChecking yes
+```
+
+Then create a `docker-compose.override.yml` mounting everything into the staging directory `/root/.ssh-host/`:
 
 ```yaml
 services:
   steward:
     volumes:
-      - ~/.ssh/id_rsa-gitlab:/root/.ssh/id_rsa-gitlab:ro
-      - ~/.ssh/id_rsa-github:/root/.ssh/id_rsa-github:ro
-      - ~/.ssh/config:/root/.ssh/config:ro
-      - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+      - ~/.ssh/id_rsa-gitlab:/root/.ssh-host/id_rsa-gitlab:ro
+      - ~/.ssh/id_rsa-github:/root/.ssh-host/id_rsa-github:ro
+      - ~/steward-ssh-config:/root/.ssh-host/config:ro
+      - ~/.ssh/known_hosts:/root/.ssh-host/known_hosts:ro
 ```
 
-Docker Compose merges this automatically — no extra flags needed. The entrypoint fixes key permissions automatically on startup. Use SSH URLs in your manifests:
+Docker Compose merges this automatically. The entrypoint copies the files to `/root/.ssh/` with correct root ownership and permissions on startup — bind-mounted files retain the host user's UID which SSH rejects. Use SSH URLs in your manifests:
 
 ```yaml
 repo: git@github.com:you/arr-stack.git
@@ -190,6 +203,12 @@ docker logs -f steward
 ```
 
 All output (cron + steward) is forwarded to the container's stdout via `/proc/1/fd/1`.
+
+Set `LOGLEVEL=DEBUG` in your `.env` to enable verbose path diagnostics. At DEBUG level, steward logs both the container-internal path and the corresponding host path for every file it touches (repos, compose files, env files), plus a full mount map at startup. This is useful for diagnosing `env_file` or repo path mismatches:
+
+```env
+LOGLEVEL=DEBUG
+```
 
 ---
 

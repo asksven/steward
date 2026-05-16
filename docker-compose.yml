@@ -18,6 +18,9 @@ services:
       AGENT_CONTAINER_NAME: ${AGENT_CONTAINER_NAME:-steward}
       AGENT_IMAGE: ${AGENT_IMAGE}
 
+      # Logging — set to DEBUG for verbose path diagnostics
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+
     volumes:
       # Docker socket — needed to run compose commands
       - /var/run/docker.sock:/var/run/docker.sock
