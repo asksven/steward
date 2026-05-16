@@ -89,10 +89,12 @@ All configuration is via environment variables.
 |---|---|---|---|
 | `CONTROL_REPO_URL` | yes | — | URL of the control repo (embed token for private repos) |
 | `CONTROL_REPO_BRANCH` | no | `main` | Branch to track on the control repo |
-| `GITOPS_ROOT` | no | `~/git` | Root directory for local repo clones |
+| `STEWARD_DATA_DIR` | no | `./steward-data` | Host path where git repos are cloned (outside the container) |
+| `GITOPS_ROOT` | no | `/git` | Repo root inside the container — change only if you remap the volume |
 | `GITOPS_NODE_NAME` | no | `hostname` | Node name, must match `nodes/<name>` in control repo |
 | `AGENT_CONTAINER_NAME` | no | — | Container name of the agent itself, required for self-update |
-| `AGENT_IMAGE` | no | — | Full image name including tag, required for self-update |
+| `AGENT_IMAGE` | yes | — | Full image name including tag, used for deployment and self-update |
+| `LOGLEVEL` | no | `INFO` | Log level (`DEBUG` enables per-path inside/outside diagnostics) |
 
 ---
 
@@ -109,7 +111,7 @@ ref:
   # tag: v1.2.3                         # pin to a specific release
 path: .                                 # path within repo to compose file, default: .
 compose_file: docker-compose.yml        # compose filename, default: docker-compose.yml
-env_file: /opt/gitops/arr.env           # absolute path on node, ~ for none
+env_file: /git/envs/arr.env             # path inside the container; /git maps to STEWARD_DATA_DIR on the host
 enabled: true                           # required, explicit — use false to disable without deleting
 ```
 

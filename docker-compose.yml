@@ -11,7 +11,7 @@ services:
       # Node identity — defaults to container hostname if not set
       GITOPS_NODE_NAME: ${GITOPS_NODE_NAME:-}
 
-      # Local repo root inside the container — maps to a host volume below
+      # Local repo root inside the container — maps to STEWARD_DATA_DIR on the host
       GITOPS_ROOT: ${GITOPS_ROOT:-/git}
 
       # Self-update — agent will restart itself when a new image is pushed
@@ -25,13 +25,6 @@ services:
       # Docker socket — needed to run compose commands
       - /var/run/docker.sock:/var/run/docker.sock
 
-      # Persistent git repos — survives container restarts and reboots
-      - steward-data:/git
-
-      # SSH key for private repos (option B)
-      # - ~/.ssh/gitops_ed25519:/root/.ssh/id_ed25519:ro
-      # - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
-
-volumes:
-  steward-data:
-    driver: local
+      # Persistent git repos — bind-mounted so the host path is predictable
+      # Set STEWARD_DATA_DIR in .env to control the outside path
+      - ${STEWARD_DATA_DIR:-./steward-data}:/git
