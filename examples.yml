@@ -1,0 +1,61 @@
+# Example control repo structure
+#
+# homelab-gitops/
+#   nodes/
+#     node1.lan/
+#       arr.yml
+#       prometheus.yml
+#     node2.lan/
+#       arr.yml
+#   templates/
+#     arr.yml
+#     prometheus.yml
+
+---
+# templates/arr.yml
+# Copy this to nodes/<hostname>/arr.yml and customize
+version: 1
+name: arr
+repo: https://github.com/you/arr-stack
+ref:
+  branch: main
+path: .
+compose_file: docker-compose.yml
+env_file: ~
+enabled: true
+
+---
+# templates/prometheus-node-exporter.yml
+version: 1
+name: prometheus-node-exporter
+repo: https://github.com/you/prometheus-stack
+ref:
+  branch: main
+path: .
+compose_file: docker-compose.yml
+env_file: ~
+enabled: true
+
+---
+# nodes/node1.lan/arr.yml
+version: 1
+name: arr
+repo: https://github.com/you/arr-stack
+ref:
+  branch: main
+path: .
+compose_file: docker-compose.yml
+env_file: /opt/gitops/arr.env
+enabled: true
+
+---
+# nodes/node1.lan/prometheus-node-exporter.yml
+version: 1
+name: prometheus-node-exporter
+repo: https://github.com/you/prometheus-stack
+ref:
+  tag: v1.8.0          # pinned to a release tag on this node
+path: .
+compose_file: docker-compose.yml
+env_file: ~
+enabled: true

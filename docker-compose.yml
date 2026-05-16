@@ -1,0 +1,39 @@
+services:
+  steward:
+    image: ghcr.io/you/steward:latest
+    container_name: steward
+    restart: unless-stopped
+    environment:
+      # Required
+      CONTROL_REPO_URL: https://github.com/you/homelab-gitops
+      CONTROL_REPO_BRANCH: main
+
+      # Node identity — defaults to container hostname if not set
+      # GITOPS_NODE_NAME: node1.lan
+
+      # Local repo root inside the container — maps to a host volume below
+      GITOPS_ROOT: /git
+
+      # Self-update — agent will restart itself when a new image is pushed
+      AGENT_CONTAINER_NAME: steward
+      AGENT_IMAGE: ghcr.io/you/steward:latest
+
+      # Private repo auth (choose one approach):
+      # Option A: token inline (fine for homelab)
+      # CONTROL_REPO_URL: https://oauth2:${GITHUB_TOKEN}@github.com/you/homelab-gitops
+      # Option B: mount SSH key (see volumes below)
+
+    volumes:
+      # Docker socket — needed to run compose commands
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Persistent git repos — survives container restarts and reboots
+      - steward-data:/git
+
+      # SSH key for private repos (option B)
+      # - ~/.ssh/gitops_ed25519:/root/.ssh/id_ed25519:ro
+      # - ~/.ssh/known_hosts:/root/.ssh/known_hosts:ro
+
+volumes:
+  steward-data:
+    driver: local
