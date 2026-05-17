@@ -19,6 +19,10 @@ if [ -d /root/.ssh-host ] && ls /root/.ssh-host/* >/dev/null 2>&1; then
   cp /root/.ssh-host/* /root/.ssh/
   chmod 700 /root/.ssh
   chmod 600 /root/.ssh/*
+  # If running as non-root, transfer ownership so su-exec'd process can read the keys
+  if [ "${STEWARD_UID}" != "0" ]; then
+    chown -R "${STEWARD_UID}:${STEWARD_GID}" /root/.ssh
+  fi
 fi
 
 # Ensure git root directories exist and are owned by the target user
