@@ -4,6 +4,7 @@ FROM python:3.12-alpine
 RUN apk add --no-cache \
     git \
     docker-cli \
+    docker-cli-compose \
     openssh-client \
     su-exec \
     && pip install --no-cache-dir \
