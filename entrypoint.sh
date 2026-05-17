@@ -53,13 +53,13 @@ EOF
   echo "Crontab installed"
 
   echo "Running initial reconciliation..."
-  su-exec "${STEWARD_UID}:${STEWARD_GID}" env HOME="${STEWARD_HOME}" python3 /app/steward.py reconcile
+  su-exec "${STEWARD_UID}:${STEWARD_GID}" env HOME="${STEWARD_HOME}" python3 /app/steward.py reconcile || true
 else
   crontab /etc/cron/crontab
   echo "Crontab installed"
 
   echo "Running initial reconciliation..."
-  python3 /app/steward.py reconcile
+  python3 /app/steward.py reconcile || true
 fi
 
 # Start cron in foreground, log to stdout
