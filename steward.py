@@ -10,9 +10,11 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 
 import yaml
 from git import Repo, GitCommandError, InvalidGitRepositoryError
@@ -96,6 +98,46 @@ def log_mounts() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Metrics helpers
+# ---------------------------------------------------------------------------
+
+def strip_url_credentials(url: str) -> str:
+    """Remove embedded credentials from a repo URL, safe for use as a metric label."""
+    try:
+        p = urlparse(url)
+        if p.scheme in ("http", "https") and p.username:
+            netloc = p.hostname + (f":{p.port}" if p.port else "")
+            return urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        pass
+    return url
+
+
+def _load_metrics_state() -> dict:
+    try:
+        return json.loads(METRICS_STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_metrics_state(state: dict) -> None:
+    try:
+        METRICS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = METRICS_STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.rename(METRICS_STATE_FILE)
+    except Exception as e:
+        log.warning("Failed to save metrics state: %s", e)
+
+
+def _inc(d: dict, *keys, by: int = 1) -> None:
+    """Increment a nested counter in a state dict."""
+    for k in keys[:-1]:
+        d = d.setdefault(k, {})
+    d[keys[-1]] = d.get(keys[-1], 0) + by
+
+
+# ---------------------------------------------------------------------------
 # Configuration (from environment)
 # ---------------------------------------------------------------------------
 
@@ -105,6 +147,7 @@ CONTROL_REPO_URL    = os.environ.get("CONTROL_REPO_URL", "")
 CONTROL_REPO_BRANCH = os.environ.get("CONTROL_REPO_BRANCH", "main")
 CONTROL_REPO_DIR    = GITOPS_ROOT / "control"
 STACKS_DIR          = GITOPS_ROOT / "stacks"
+METRICS_STATE_FILE  = GITOPS_ROOT / "metrics" / "state.json"
 
 # ---------------------------------------------------------------------------
 # App manifest schema
@@ -345,39 +388,37 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
 # Self-update
 # ---------------------------------------------------------------------------
 
-def self_update() -> None:
+def self_update() -> str:
     """
     Check if a newer image is available for the agent itself and restart
     the agent container if so. Requires AGENT_CONTAINER_NAME env var.
+    Returns: 'skipped', 'no_update', 'updated', or 'failed'.
     """
     container_name = os.environ.get("AGENT_CONTAINER_NAME")
     if not container_name:
         log.debug("AGENT_CONTAINER_NAME not set, skipping self-update")
-        return
+        return "skipped"
 
     agent_image = os.environ.get("AGENT_IMAGE")
     if not agent_image:
         log.debug("AGENT_IMAGE not set, skipping self-update")
-        return
+        return "skipped"
 
     log.info("Checking for agent self-update (image: %s)", agent_image)
 
     try:
-        # Pull the latest image
         result = subprocess.run(
             ["docker", "pull", agent_image],
             capture_output=True, text=True, timeout=120,
         )
         if result.returncode != 0:
             log.error("docker pull failed: %s", result.stderr)
-            return
+            return "failed"
 
-        # Get the digest of the running container's image
         running = subprocess.run(
             ["docker", "inspect", "--format", "{{.Image}}", container_name],
             capture_output=True, text=True, timeout=10,
         )
-        # Get the digest of the newly pulled image
         latest = subprocess.run(
             ["docker", "inspect", "--format", "{{.Id}}", agent_image],
             capture_output=True, text=True, timeout=10,
@@ -385,14 +426,14 @@ def self_update() -> None:
 
         if running.returncode != 0 or latest.returncode != 0:
             log.warning("Could not compare image digests, skipping restart")
-            return
+            return "failed"
 
         running_digest = running.stdout.strip()
         latest_digest = latest.stdout.strip()
 
         if running_digest == latest_digest:
             log.info("Agent image is up to date")
-            return
+            return "no_update"
 
         log.info(
             "New agent image detected (%s → %s), restarting container",
@@ -406,11 +447,15 @@ def self_update() -> None:
         )
         if restart.returncode != 0:
             log.error("docker restart failed: %s", restart.stderr)
+            return "failed"
+        return "updated"
 
     except subprocess.TimeoutExpired:
         log.error("Self-update timed out")
+        return "failed"
     except FileNotFoundError:
         log.error("docker not found during self-update")
+        return "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -437,14 +482,24 @@ def load_node_manifests(control_repo: Repo) -> list[AppManifest]:
     return manifests
 
 
-def reconcile_app(app: AppManifest) -> bool:
+def reconcile_app(app: AppManifest, state: dict) -> bool:
     """
     Reconcile a single app. Returns True on success.
     Clones stack repo if needed, syncs, runs compose if changed.
+    Updates metrics state in-place.
     """
     stack_path = STACKS_DIR / app.name
     log.debug("App '%s' | inside  stack_path: %s", app.name, stack_path)
     log.debug("App '%s' | outside stack_path: %s", app.name, host_path(stack_path))
+
+    app_state = state.setdefault("apps", {}).setdefault(app.name, {})
+    app_state.update({
+        "repo": strip_url_credentials(app.repo),
+        "ref": app.ref.branch or app.ref.tag or "",
+        "ref_type": "branch" if app.ref.branch else "tag",
+        "enabled": app.enabled,
+    })
+    app_state["last_reconcile_timestamp"] = time.time()
 
     # Ensure stack repo is cloned
     try:
@@ -456,6 +511,7 @@ def reconcile_app(app: AppManifest) -> bool:
         )
     except GitCommandError as e:
         log.error("Failed to clone repo for app '%s': %s", app.name, e)
+        _inc(app_state, "reconcile_total", "failed")
         return False
 
     # Check for changes and sync
@@ -463,9 +519,17 @@ def reconcile_app(app: AppManifest) -> bool:
 
     if updated:
         log.info("App '%s' repo updated, running compose", app.name)
-        return run_compose(app, stack_path)
+        success = run_compose(app, stack_path)
+        _inc(app_state, "sync_total", "success" if success else "failed")
+        if success:
+            app_state["last_sync_timestamp"] = time.time()
+            _inc(app_state, "reconcile_total", "success")
+        else:
+            _inc(app_state, "reconcile_total", "failed")
+        return success
     else:
         log.info("App '%s' is up to date, no action needed", app.name)
+        _inc(app_state, "reconcile_total", "success")
         return True
 
 
@@ -476,12 +540,19 @@ def reconcile(mode: str = "reconcile") -> int:
     Returns exit code (0 = success, 1 = partial failure, 2 = fatal).
     """
     if mode == "self-update":
-        self_update()
+        state = _load_metrics_state()
+        result = self_update()
+        _inc(state, "self_update", "total", result)
+        _save_metrics_state(state)
         return 0
 
     if not CONTROL_REPO_URL:
         log.error("CONTROL_REPO_URL is not set")
         return 2
+
+    start_time = time.time()
+    state = _load_metrics_state()
+    state["node"] = GITOPS_NODE_NAME
 
     GITOPS_ROOT.mkdir(parents=True, exist_ok=True)
     STACKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -508,6 +579,9 @@ def reconcile(mode: str = "reconcile") -> int:
         )
     except GitCommandError as e:
         log.error("Failed to clone/open control repo: %s", e)
+        _inc(state, "reconcile", "total", "fatal")
+        state.setdefault("reconcile", {})["last_timestamp"] = time.time()
+        _save_metrics_state(state)
         return 2
 
     control_ref = AppRef(branch=CONTROL_REPO_BRANCH)
@@ -517,6 +591,12 @@ def reconcile(mode: str = "reconcile") -> int:
     manifests = load_node_manifests(control_repo)
     if not manifests:
         log.info("No apps to reconcile")
+        end_time = time.time()
+        rec = state.setdefault("reconcile", {})
+        rec["last_timestamp"] = end_time
+        rec["last_duration_seconds"] = end_time - start_time
+        _inc(state, "reconcile", "total", "success")
+        _save_metrics_state(state)
         return 0
 
     # Step 3: reconcile each enabled app
@@ -524,9 +604,17 @@ def reconcile(mode: str = "reconcile") -> int:
     for app in manifests:
         if not app.enabled:
             log.info("App '%s' is disabled, skipping", app.name)
+            app_state = state.setdefault("apps", {}).setdefault(app.name, {})
+            app_state.update({
+                "repo": strip_url_credentials(app.repo),
+                "ref": app.ref.branch or app.ref.tag or "",
+                "ref_type": "branch" if app.ref.branch else "tag",
+                "enabled": False,
+            })
+            _inc(app_state, "reconcile_total", "skipped")
             results[app.name] = "disabled"
             continue
-        success = reconcile_app(app)
+        success = reconcile_app(app, state)
         results[app.name] = "ok" if success else "failed"
 
     # Summary
@@ -538,6 +626,14 @@ def reconcile(mode: str = "reconcile") -> int:
         sum(1 for s in results.values() if s == "ok"),
         len(failed),
     )
+
+    end_time = time.time()
+    rec = state.setdefault("reconcile", {})
+    rec["last_timestamp"] = end_time
+    rec["last_duration_seconds"] = end_time - start_time
+    run_result = "partial_failure" if failed else "success"
+    _inc(state, "reconcile", "total", run_result)
+    _save_metrics_state(state)
 
     if failed:
         log.warning("Failed apps: %s", ", ".join(failed))

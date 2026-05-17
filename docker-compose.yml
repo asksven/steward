@@ -25,6 +25,13 @@ services:
       # Logging — set to DEBUG for verbose path diagnostics
       LOGLEVEL: ${LOGLEVEL:-INFO}
 
+      # Metrics — set METRICS_PORT to expose a Prometheus /metrics scrape endpoint (default: disabled)
+      METRICS_PORT: ${METRICS_PORT:-}
+
+    # Expose the metrics port via docker-compose.override.yml, e.g.:
+    #   ports:
+    #     - "9101:9101"
+
     volumes:
       # Docker socket — needed to run compose commands
       - /var/run/docker.sock:/var/run/docker.sock

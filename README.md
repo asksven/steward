@@ -97,6 +97,7 @@ All configuration is via environment variables.
 | `AGENT_CONTAINER_NAME` | no | — | Container name of the agent itself, required for self-update |
 | `AGENT_IMAGE` | yes | — | Full image name including tag, used for deployment and self-update |
 | `LOGLEVEL` | no | `INFO` | Log level (`DEBUG` enables per-path inside/outside diagnostics) |
+| `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
 
 ---
 
@@ -213,6 +214,62 @@ Set `LOGLEVEL=DEBUG` in your `.env` to enable verbose path diagnostics. At DEBUG
 ```env
 LOGLEVEL=DEBUG
 ```
+
+---
+
+## Metrics
+
+Set `METRICS_PORT` in your `.env` to start a Prometheus scrape endpoint inside the container:
+
+```env
+METRICS_PORT=9101
+```
+
+Expose the port via `docker-compose.override.yml`:
+
+```yaml
+services:
+  steward:
+    ports:
+      - "9101:9101"
+```
+
+Then add a scrape config to your Prometheus:
+
+```yaml
+scrape_configs:
+  - job_name: steward
+    static_configs:
+      - targets:
+          - media-1:9101   # one entry per node
+          - media-2:9101
+```
+
+### Exposed metrics
+
+| Metric | Type | Description |
+|---|---|---|
+| `steward_reconcile_last_timestamp_seconds` | gauge | Unix timestamp of last completed reconciliation run |
+| `steward_reconcile_duration_seconds` | gauge | Duration of last reconciliation run |
+| `steward_reconcile_total{result}` | counter | Reconciliation runs by result (`success`, `partial_failure`, `fatal`) |
+| `steward_self_update_total{result}` | counter | Self-update checks by result (`no_update`, `updated`, `failed`, `skipped`) |
+| `steward_app_info{app,repo,ref,ref_type,enabled}` | gauge | Static app information (always 1) |
+| `steward_app_last_reconcile_timestamp_seconds{app}` | gauge | Unix timestamp of last reconcile attempt per app |
+| `steward_app_last_sync_timestamp_seconds{app}` | gauge | Unix timestamp of last `docker compose up` per app |
+| `steward_app_reconcile_total{app,result}` | counter | Reconcile attempts per app by result (`success`, `failed`, `skipped`) |
+| `steward_app_sync_total{app,result}` | counter | Compose runs per app by result (`success`, `failed`) |
+
+All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
+
+### Grafana alerts
+
+| Alert | Expression | Severity |
+|---|---|---|
+| Compose apply failed | `increase(steward_app_sync_total{result="failed"}[5m]) > 0` | critical |
+| Repeated reconcile failures | `increase(steward_app_reconcile_total{result="failed"}[15m]) > 2` | warning |
+| Node not reporting | `time() - steward_reconcile_last_timestamp_seconds > 300` | critical |
+| App not reconciled | `time() - steward_app_last_reconcile_timestamp_seconds > 300` | warning |
+| Self-update failed | `increase(steward_self_update_total{result="failed"}[1h]) > 0` | warning |
 
 ---
 

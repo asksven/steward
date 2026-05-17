@@ -13,6 +13,7 @@ RUN apk add --no-cache \
 # Install app
 WORKDIR /app
 COPY steward.py .
+COPY metrics_server.py .
 
 # Install crontab
 COPY crontab /etc/cron/crontab

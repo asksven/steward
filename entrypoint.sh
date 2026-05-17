@@ -9,6 +9,7 @@ echo "  Node:         ${GITOPS_NODE_NAME:-$(hostname)}"
 echo "  Control repo: ${CONTROL_REPO_URL}"
 echo "  Gitops root:  ${GITOPS_ROOT:-/git}"
 echo "  Running as:   ${STEWARD_UID}:${STEWARD_GID}"
+echo "  Metrics port: ${METRICS_PORT:-(disabled)}"
 
 # Copy SSH credentials from staging mount to writable dir with correct root ownership
 # (bind-mounted files retain host UID; SSH rejects keys/config not owned by the running user)
@@ -23,6 +24,12 @@ fi
 # Ensure git root directories exist and are owned by the target user
 mkdir -p "${GITOPS_ROOT:-/git}/stacks"
 chown -R "${STEWARD_UID}:${STEWARD_GID}" "${GITOPS_ROOT:-/git}"
+
+# Start metrics server in background if METRICS_PORT is set
+if [ -n "${METRICS_PORT:-}" ]; then
+  python3 /app/metrics_server.py "${METRICS_PORT}" >> /proc/1/fd/1 2>&1 &
+  echo "Metrics server started on port ${METRICS_PORT}"
+fi
 
 if [ "${STEWARD_UID}" != "0" ]; then
   # Allow the non-root process to reach the Docker socket
