@@ -32,7 +32,7 @@ steward/
   examples.yml           # Example app manifests
   .github/
     workflows/
-      build.yml          # Build and push image to GHCR on push to main
+      build.yml          # Build and push image to GHCR on push to main or version tag
 ```
 
 ---
@@ -49,14 +49,9 @@ steward/
 
 ### 1. Build and push the agent image
 
-Update `.github/workflows/build.yml` with your registry path, then push to `main`. The workflow builds and pushes to `ghcr.io/<you>/steward:latest`.
+Update `.github/workflows/build.yml` with your registry path (the `IMAGE_NAME` env var), then push to `main`. The workflow builds and pushes automatically to GHCR.
 
-Or build manually:
-
-```bash
-docker build -t ghcr.io/<you>/steward:latest .
-docker push ghcr.io/<you>/steward:latest
-```
+See the [Releasing](#releasing) section for what image tags are produced and which one to use in your `.env`.
 
 ### 2. Set up your control repo
 
@@ -214,7 +209,15 @@ repo: git@github.com:you/arr-stack.git
 
 ## Self-update
 
-When `AGENT_CONTAINER_NAME` and `AGENT_IMAGE` are set, the agent checks hourly whether a newer image has been pushed to the registry. If the digest of the pulled image differs from the running container's image, it runs `docker restart <container>`. Since crond is the PID 1 driver, the restart picks up the new image without breaking the schedule.
+When `AGENT_CONTAINER_NAME` and `AGENT_IMAGE` are set, the agent checks hourly whether a newer image has been pushed to the registry. It pulls `AGENT_IMAGE`, compares the digest of the pulled image against the running container's image, and runs `docker restart <container>` if they differ. Since crond is the PID 1 driver, the restart picks up the new image without breaking the schedule.
+
+For self-update to work, `AGENT_IMAGE` must reference a **moving tag** — one that gets updated when a new release is pushed. Use the rolling major version tag:
+
+```env
+AGENT_IMAGE=ghcr.io/<you>/steward:0
+```
+
+The `:0` tag is updated on every `v0.x.y` release. When a breaking `v1.0.0` is released, `:0` stops moving and `:1` takes over, giving you an explicit opt-in point for breaking changes. See [Releasing](#releasing) for the full tag matrix.
 
 ---
 
@@ -269,6 +272,8 @@ scrape_configs:
 | `steward_reconcile_last_timestamp_seconds` | gauge | Unix timestamp of last completed reconciliation run |
 | `steward_reconcile_duration_seconds` | gauge | Duration of last reconciliation run |
 | `steward_reconcile_total{result}` | counter | Reconciliation runs by result (`success`, `partial_failure`, `fatal`) |
+| `steward_control_repo_sync_total{result}` | counter | Control repo sync attempts by result (`up_to_date`, `updated`, `failed`) |
+| `steward_manifest_parse_errors_total` | counter | Total manifest parse errors encountered |
 | `steward_self_update_total{result}` | counter | Self-update checks by result (`no_update`, `updated`, `failed`, `skipped`) |
 | `steward_app_info{app,repo,ref,ref_type,enabled}` | gauge | Static app information (always 1) |
 | `steward_app_last_reconcile_timestamp_seconds{app}` | gauge | Unix timestamp of last reconcile attempt per app |
@@ -312,12 +317,59 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 
 ---
 
+## Releasing
+
+The GitHub Actions workflow (`build.yml`) triggers on two events:
+
+| Trigger | Condition |
+|---|---|
+| Push to `main` | Only when files under `steward/` change |
+| Push of a `v*` tag | Always |
+
+### Image tags produced
+
+| Event | Tags produced |
+|---|---|
+| Push to `main` | `main`, `sha-<sha>`, `latest` |
+| Push of `v0.1.0` | `v0.1.0`, `0.1.0`, `0.1`, `0`, `sha-<sha>` |
+
+`latest` is only added on `main` pushes, not on tag pushes.
+
+### How to cut a release
+
+```bash
+# Ensure main is up to date and all changes are committed
+git push origin main          # triggers build → updates :latest, :main
+
+# Tag the release
+git tag v0.1.0
+git push origin v0.1.0        # triggers build → creates :v0.1.0, :0.1.0, :0.1, :0
+```
+
+Push both in the same command if you prefer:
+
+```bash
+git tag v0.1.0
+git push origin main v0.1.0
+```
+
+### Which tag to use in .env
+
+| Use case | `AGENT_IMAGE` tag |
+|---|---|
+| Auto-update on every `0.x.y` release (recommended) | `:0` |
+| Auto-update only on `0.1.x` patch releases | `:0.1` |
+| Pinned to a specific release, no auto-update | `:v0.1.0` |
+
+The rolling major tag (`:0`) is the recommended choice. It moves with every release in the `0.x` series and stops moving when a breaking `v1.0.0` is cut — giving nodes an explicit opt-in moment for major version upgrades.
+
+---
+
 ## Extending
 
 Some natural next steps not yet implemented:
 
-- **Failure notifications** - POST to a webhook (Gotify, ntfy, Slack) on reconciliation failure
-- **Metrics** - Expose (push) prometheus metrics to a push gateway for dashboards/alerts
+- **Failure notifications** — POST to a webhook (Gotify, ntfy, Slack) on reconciliation failure
 - **Dry-run mode** — `python3 steward.py --dry-run` to show what would change without applying
 - **Status command** — print current deployed SHA vs remote SHA for each app
 - **Schema version 2** — reserved for future manifest extensions

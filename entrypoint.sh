@@ -8,6 +8,14 @@ STEWARD_GID=${STEWARD_GID:-$STEWARD_UID}
 # /root is drwx------ (700) — a process running as UID!=0 cannot traverse it.
 if [ "${STEWARD_UID}" != "0" ]; then
   STEWARD_HOME=/home/steward
+  # OpenSSH calls getpwuid() on startup and refuses to run if the UID has no
+  # /etc/passwd entry. Add one dynamically so the container works with any host UID.
+  if ! getent passwd "${STEWARD_UID}" >/dev/null 2>&1; then
+    echo "steward:x:${STEWARD_UID}:${STEWARD_GID}::/home/steward:/bin/sh" >> /etc/passwd
+  fi
+  if ! getent group "${STEWARD_GID}" >/dev/null 2>&1; then
+    echo "steward:x:${STEWARD_GID}:" >> /etc/group
+  fi
 else
   STEWARD_HOME=/root
 fi
