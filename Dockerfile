@@ -5,6 +5,7 @@ RUN apk add --no-cache \
     git \
     docker-cli \
     openssh-client \
+    su-exec \
     && pip install --no-cache-dir \
     gitpython \
     pyyaml

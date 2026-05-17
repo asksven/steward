@@ -90,6 +90,8 @@ All configuration is via environment variables.
 | `CONTROL_REPO_URL` | yes | — | URL of the control repo (embed token for private repos) |
 | `CONTROL_REPO_BRANCH` | no | `main` | Branch to track on the control repo |
 | `STEWARD_DATA_DIR` | no | `./steward-data` | Host path where git repos are cloned (outside the container) |
+| `STEWARD_UID` | no | `0` (root) | UID to run steward as — set to your host user's UID so files in `STEWARD_DATA_DIR` are not root-owned |
+| `STEWARD_GID` | no | `STEWARD_UID` | GID to run steward as — defaults to `STEWARD_UID` if not set |
 | `GITOPS_ROOT` | no | `/git` | Repo root inside the container — change only if you remap the volume |
 | `GITOPS_NODE_NAME` | no | `hostname` | Node name, must match `nodes/<name>` in control repo |
 | `AGENT_CONTAINER_NAME` | no | — | Container name of the agent itself, required for self-update |
