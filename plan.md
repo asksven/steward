@@ -127,6 +127,27 @@ Slack incoming webhooks). Keep it opt-in with no default.
 
 ---
 
+## 9. GitOps self-update via Dependabot ✓ implemented
+
+**Decisions made:**
+- Deployment `docker-compose.yml` stays in the steward source repo; Dependabot PRs land there.
+- Dependabot (not Renovate) chosen for simplicity on GitHub.
+- Bootstrap: one-time manual clone of the steward repo into `STEWARD_DATA_DIR/stacks/steward`,
+  create node-local `.env` and `docker-compose.override.yml` there, then add a steward manifest
+  to the control repo. From that point steward manages its own updates.
+- Recovery when steward is broken: manual `docker compose up` on the host — accepted, same as
+  recovering a broken ArgoCD server.
+- `AGENT_IMAGE` env var retained as a testing override (overrides the pinned tag in
+  `docker-compose.yml` for that node without touching git).
+
+**What was removed:** `self_update()` function, `AGENT_IMAGE` env var pass-through in
+`docker-compose.yml`, `0 * * * *` self-update cron entry in both `crontab` and the runtime
+crontab heredoc, `steward_self_update_total` metric, rolling-tag guidance in README.
+
+**What was added:** `.github/dependabot.yml` watching the Docker ecosystem daily.
+
+---
+
 ## Non-goals
 
 These ArgoCD concepts are deliberately out of scope for steward's design:

@@ -108,8 +108,8 @@ All configuration is via environment variables.
 | `STEWARD_GID` | no | `STEWARD_UID` | GID to run steward as — defaults to `STEWARD_UID` if not set |
 | `GITOPS_ROOT` | no | `/git` | Repo root inside the container — change only if you remap the volume |
 | `GITOPS_NODE_NAME` | no | `hostname` | Node name, must match `nodes/<name>` in control repo |
-| `AGENT_CONTAINER_NAME` | no | — | Container name of the agent itself, required for self-update |
-| `AGENT_IMAGE` | yes | — | Full image name including tag, used for deployment and self-update |
+| `AGENT_CONTAINER_NAME` | no | `steward` | Container name, used only for debug path logging (`docker inspect`) |
+| `AGENT_IMAGE` | no | — | Overrides the image tag in `docker-compose.yml`; useful for testing a local build |
 | `LOGLEVEL` | no | `INFO` | Log level (`DEBUG` enables per-path inside/outside diagnostics) |
 | `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
 
@@ -209,15 +209,34 @@ repo: git@github.com:you/arr-stack.git
 
 ## Self-update
 
-When `AGENT_CONTAINER_NAME` and `AGENT_IMAGE` are set, the agent checks hourly whether a newer image has been pushed to the registry. It pulls `AGENT_IMAGE`, compares the digest of the pulled image against the running container's image, and runs `docker restart <container>` if they differ. Since crond is the PID 1 driver, the restart picks up the new image without breaking the schedule.
+Steward updates itself the same way it updates any other app: through git. The image version is pinned directly in `docker-compose.yml` and **Dependabot** opens a PR whenever a new release is published to GHCR. Merging the PR causes steward to detect a change in its own stack repo and run `docker compose up -d`, which pulls the new image and recreates the container. crond restarts cleanly in the new container.
 
-For self-update to work, `AGENT_IMAGE` must reference a **moving tag** — one that gets updated when a new release is pushed. Use the rolling major version tag:
+### Bootstrap
 
-```env
-AGENT_IMAGE=ghcr.io/<you>/steward:0
+The first time you deploy steward on a node, clone the steward repo into `STEWARD_DATA_DIR/stacks/steward` manually, create a `.env` and `docker-compose.override.yml` there for node-specific settings (SSH mounts, ports, etc.), and start the container. Once steward is running and its own stack repo is in `STEWARD_DATA_DIR/stacks/steward`, it will manage its own updates from that point on.
+
+Add a manifest for steward itself in the control repo under `nodes/<hostname>/`:
+
+```yaml
+version: 1
+name: steward
+repo: https://github.com/<you>/steward
+ref:
+  branch: main
+path: .
+compose_file: docker-compose.yml
+enabled: true
 ```
 
-The `:0` tag is updated on every `v0.x.y` release. When a breaking `v1.0.0` is released, `:0` stops moving and `:1` takes over, giving you an explicit opt-in point for breaking changes. See [Releasing](#releasing) for the full tag matrix.
+### Testing a local build
+
+To run a locally built image without changing `docker-compose.yml`, set `AGENT_IMAGE` in the `.env` file next to your deployment:
+
+```env
+AGENT_IMAGE=ghcr.io/<you>/steward:dev
+```
+
+This overrides the pinned tag for that node only and is not tracked by Dependabot.
 
 ---
 
@@ -274,7 +293,6 @@ scrape_configs:
 | `steward_reconcile_total{result}` | counter | Reconciliation runs by result (`success`, `partial_failure`, `fatal`) |
 | `steward_control_repo_sync_total{result}` | counter | Control repo sync attempts by result (`up_to_date`, `updated`, `failed`) |
 | `steward_manifest_parse_errors_total` | counter | Total manifest parse errors encountered |
-| `steward_self_update_total{result}` | counter | Self-update checks by result (`no_update`, `updated`, `failed`, `skipped`) |
 | `steward_app_info{app,repo,ref,ref_type,enabled}` | gauge | Static app information (always 1) |
 | `steward_app_last_reconcile_timestamp_seconds{app}` | gauge | Unix timestamp of last reconcile attempt per app |
 | `steward_app_last_sync_timestamp_seconds{app}` | gauge | Unix timestamp of last `docker compose up` per app |
@@ -291,7 +309,6 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 | Repeated reconcile failures | `increase(steward_app_reconcile_total{result="failed"}[15m]) > 2` | warning |
 | Node not reporting | `time() - steward_reconcile_last_timestamp_seconds > 300` | critical |
 | App not reconciled | `time() - steward_app_last_reconcile_timestamp_seconds > 300` | warning |
-| Self-update failed | `increase(steward_self_update_total{result="failed"}[1h]) > 0` | warning |
 
 ---
 
@@ -301,18 +318,13 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 1. git fetch control repo
    └── if changed: pull, re-read node manifests
 
-2. for each app manifest:
+2. for each app manifest (including steward itself, if present):
    ├── enabled: false → skip
    ├── stack repo not cloned → clone
    ├── git fetch stack repo
    │   ├── up to date → skip
    │   └── changed → git pull/checkout → docker compose up -d --remove-orphans --pull always
    └── log result
-
-3. (hourly) self-update:
-   ├── docker pull <agent image>
-   ├── compare digest of running container vs pulled image
-   └── if different → docker restart <container name>
 ```
 
 ---

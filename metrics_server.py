@@ -57,10 +57,6 @@ def format_metrics(state: dict) -> str:
               "steward_manifest_parse_errors_total",
               rec["manifest_parse_errors"], node=node)
 
-    for result, count in state.get("self_update", {}).get("total", {}).items():
-        write("Total self-update checks by result", "counter",
-              "steward_self_update_total", count, node=node, result=result)
-
     # --- app-level ---
     for app_name, app in state.get("apps", {}).items():
         base = dict(node=node, app=app_name)

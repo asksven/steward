@@ -1,6 +1,8 @@
 services:
   steward:
-    image: ${AGENT_IMAGE:-ghcr.io/asksven/steward:latest}
+    # Version is pinned here and updated by Dependabot PRs.
+    # Override with AGENT_IMAGE in .env for local testing (e.g. AGENT_IMAGE=ghcr.io/asksven/steward:dev).
+    image: ${AGENT_IMAGE:-ghcr.io/asksven/steward:v0.1.0}
     container_name: steward
     restart: unless-stopped
     environment:
@@ -14,9 +16,8 @@ services:
       # Local repo root inside the container — maps to STEWARD_DATA_DIR on the host
       GITOPS_ROOT: ${GITOPS_ROOT:-/git}
 
-      # Self-update — agent will restart itself when a new image is pushed
+      # Container name — used only for debug path logging (docker inspect)
       AGENT_CONTAINER_NAME: ${AGENT_CONTAINER_NAME:-steward}
-      AGENT_IMAGE: ${AGENT_IMAGE}
 
       # File ownership — set to host UID/GID so files in STEWARD_DATA_DIR are not owned by root
       STEWARD_UID: ${STEWARD_UID:-0}

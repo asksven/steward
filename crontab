@@ -1,6 +1,3 @@
 # steward crontab
 # Reconcile stacks every minute
 * * * * * python3 /app/steward.py reconcile >> /proc/1/fd/1 2>&1
-
-# Self-update check every hour
-0 * * * * python3 /app/steward.py self-update >> /proc/1/fd/1 2>&1

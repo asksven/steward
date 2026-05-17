@@ -385,80 +385,6 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Self-update
-# ---------------------------------------------------------------------------
-
-def self_update() -> str:
-    """
-    Check if a newer image is available for the agent itself and restart
-    the agent container if so. Requires AGENT_CONTAINER_NAME env var.
-    Returns: 'skipped', 'no_update', 'updated', or 'failed'.
-    """
-    container_name = os.environ.get("AGENT_CONTAINER_NAME")
-    if not container_name:
-        log.debug("AGENT_CONTAINER_NAME not set, skipping self-update")
-        return "skipped"
-
-    agent_image = os.environ.get("AGENT_IMAGE")
-    if not agent_image:
-        log.debug("AGENT_IMAGE not set, skipping self-update")
-        return "skipped"
-
-    log.info("Checking for agent self-update (image: %s)", agent_image)
-
-    try:
-        result = subprocess.run(
-            ["docker", "pull", agent_image],
-            capture_output=True, text=True, timeout=120,
-        )
-        if result.returncode != 0:
-            log.error("docker pull failed: %s", result.stderr)
-            return "failed"
-
-        running = subprocess.run(
-            ["docker", "inspect", "--format", "{{.Image}}", container_name],
-            capture_output=True, text=True, timeout=10,
-        )
-        latest = subprocess.run(
-            ["docker", "inspect", "--format", "{{.Id}}", agent_image],
-            capture_output=True, text=True, timeout=10,
-        )
-
-        if running.returncode != 0 or latest.returncode != 0:
-            log.warning("Could not compare image digests, skipping restart")
-            return "failed"
-
-        running_digest = running.stdout.strip()
-        latest_digest = latest.stdout.strip()
-
-        if running_digest == latest_digest:
-            log.info("Agent image is up to date")
-            return "no_update"
-
-        log.info(
-            "New agent image detected (%s → %s), restarting container",
-            running_digest[:12],
-            latest_digest[:12],
-        )
-
-        restart = subprocess.run(
-            ["docker", "restart", container_name],
-            capture_output=True, text=True, timeout=30,
-        )
-        if restart.returncode != 0:
-            log.error("docker restart failed: %s", restart.stderr)
-            return "failed"
-        return "updated"
-
-    except subprocess.TimeoutExpired:
-        log.error("Self-update timed out")
-        return "failed"
-    except FileNotFoundError:
-        log.error("docker not found during self-update")
-        return "failed"
-
-
-# ---------------------------------------------------------------------------
 # Main reconciliation loop
 # ---------------------------------------------------------------------------
 
@@ -541,19 +467,11 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
         return True
 
 
-def reconcile(mode: str = "reconcile") -> int:
+def reconcile() -> int:
     """
     Main entry point for a reconciliation run.
-    mode: 'reconcile' | 'self-update'
     Returns exit code (0 = success, 1 = partial failure, 2 = fatal).
     """
-    if mode == "self-update":
-        state = _load_metrics_state()
-        result = self_update()
-        _inc(state, "self_update", "total", result)
-        _save_metrics_state(state)
-        return 0
-
     if not CONTROL_REPO_URL:
         log.error("CONTROL_REPO_URL is not set")
         return 2
@@ -668,5 +586,4 @@ def reconcile(mode: str = "reconcile") -> int:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "reconcile"
-    sys.exit(reconcile(mode=mode))
+    sys.exit(reconcile())
