@@ -148,6 +148,53 @@ crontab heredoc, `steward_self_update_total` metric, rolling-tag guidance in REA
 
 ---
 
+## 10. Self-update: helper container pattern
+
+**Problem:** When steward reconciles its own stack, it runs `docker compose up -d` from inside its
+own container. Docker Compose sends `SIGTERM` to the running container (steward itself) before the
+replacement container is started. The in-flight `compose up` process is killed along with the
+container, so the new container is never created. `restart: unless-stopped` does not help because
+Docker marks a container stopped by Compose as intentionally stopped. The result: steward stops,
+the new image is never pulled, and the only recovery is a manual `docker compose up -d` on the
+host.
+
+**Proposed solution (Option B — helper container):**
+When steward detects it is reconciling its own stack (i.e. `app.name` matches the running
+container name from `AGENT_CONTAINER_NAME`), instead of calling `docker compose up -d` directly,
+it spawns a short-lived helper container via the Docker socket:
+
+```python
+docker run --rm -d \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v <stack_dir>:<stack_dir> \
+  -w <stack_dir> \
+  docker:cli \
+  sh -c "sleep 5 && docker compose up -d --remove-orphans --pull always"
+```
+
+The helper runs in a separate container that is not steward. When Docker Compose stops steward, the
+helper container is unaffected. After the 5-second delay (long enough for steward to be fully
+stopped and Docker's bookkeeping to settle), the helper runs `compose up` which creates the new
+steward container and exits cleanly.
+
+**Implementation notes:**
+- Detecting the self-update case: check `os.environ.get("AGENT_CONTAINER_NAME")` and compare to
+  `app.name` (both default to `steward`).
+- The helper needs the stack directory mounted at the same absolute path so that relative volume
+  paths in `docker-compose.yml` resolve correctly.
+- The `docker:cli` image is a natural choice for the helper as it contains only the Docker CLI.
+  Alternatively, the running steward image itself could be used (it already has `docker-cli` and
+  `docker-cli-compose`).
+- `env_file` pass-through: if the stack has a compose env-file, it must also be mounted into the
+  helper container.
+- The helper container must be removed on exit (`--rm`) so it does not accumulate.
+
+**Complexity:** Medium — requires detecting the self-update case, building the correct `docker run`
+invocation with volume mounts, and testing the timing window. The core mechanism is straightforward
+but the mount resolution is fiddly.
+
+---
+
 ## Non-goals
 
 These ArgoCD concepts are deliberately out of scope for steward's design:

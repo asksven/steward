@@ -108,7 +108,7 @@ All configuration is via environment variables.
 | `STEWARD_GID` | no | `STEWARD_UID` | GID to run steward as — defaults to `STEWARD_UID` if not set |
 | `GITOPS_ROOT` | no | `/git` | Repo root inside the container — change only if you remap the volume |
 | `GITOPS_NODE_NAME` | no | `hostname` | Node name, must match `nodes/<name>` in control repo |
-| `AGENT_CONTAINER_NAME` | no | `steward` | Container name, used only for debug path logging (`docker inspect`) |
+| `AGENT_CONTAINER_NAME` | no | `steward` | Container name — used by `docker inspect` for debug path logging and to detect when reconciling steward's own stack (self-update via helper container) |
 | `AGENT_IMAGE` | no | — | Overrides the image tag in `docker-compose.yml`; useful for testing a local build |
 | `LOGLEVEL` | no | `INFO` | Log level (`DEBUG` enables per-path inside/outside diagnostics) |
 | `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
@@ -209,7 +209,24 @@ repo: git@github.com:you/arr-stack.git
 
 ## Self-update
 
-Steward updates itself the same way it updates any other app: through git. The image version is pinned directly in `docker-compose.yml` and **Dependabot** opens a PR whenever a new release is published to GHCR. Merging the PR causes steward to detect a change in its own stack repo and run `docker compose up -d`, which pulls the new image and recreates the container. crond restarts cleanly in the new container.
+Steward updates itself the same way it updates any other app: through git. The image version is pinned directly in `docker-compose.yml` and **Dependabot** opens a PR whenever a new release is published to GHCR. Merging the PR causes steward to detect a change in its own stack repo and trigger an update.
+
+### Why a helper container?
+
+Running `docker compose up -d` from inside a container replaces that container — Docker sends SIGTERM to the old container before the new one starts, which kills the process that initiated the update. To avoid this, steward detects when it is reconciling its own stack (by comparing `app.name` to `AGENT_CONTAINER_NAME`) and spawns a short-lived **helper container** instead:
+
+```
+docker run --rm -d \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v <STEWARD_DATA_DIR>:<STEWARD_DATA_DIR> \
+  -e HOME=/tmp \
+  <current-steward-image> \
+  sh -c "sleep 5 && docker compose -f <compose-file> up -d --remove-orphans --pull always"
+```
+
+The helper is a peer container, independent of steward's process. When Docker Compose stops steward, the helper is unaffected and creates the new container cleanly. The 5-second delay lets the old container exit fully before `compose up` runs.
+
+If host paths cannot be resolved (e.g. `AGENT_CONTAINER_NAME` is wrong or docker inspect fails), steward falls back to calling `docker compose up -d` directly — which will kill itself, but `restart: unless-stopped` ensures the container comes back up on the next Docker restart cycle.
 
 ### Bootstrap
 

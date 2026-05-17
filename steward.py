@@ -7,6 +7,7 @@ Watches a control repo for app manifests and reconciles docker compose stacks.
 import json
 import logging
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -33,17 +34,20 @@ logging.basicConfig(
 log = logging.getLogger("steward")
 
 # ---------------------------------------------------------------------------
+# Constants (read once at import time)
+# ---------------------------------------------------------------------------
+
+AGENT_CONTAINER_NAME = os.environ.get("AGENT_CONTAINER_NAME", "steward")
+
+# ---------------------------------------------------------------------------
 # Path helpers (inside ↔ outside)
 # ---------------------------------------------------------------------------
 
 def _container_mounts() -> list[dict]:
     """Return the Mounts list from docker inspect on this container, or []."""
-    container_name = os.environ.get("AGENT_CONTAINER_NAME")
-    if not container_name:
-        return []
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format", "{{json .Mounts}}", container_name],
+            ["docker", "inspect", "--format", "{{json .Mounts}}", AGENT_CONTAINER_NAME],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
@@ -53,15 +57,9 @@ def _container_mounts() -> list[dict]:
     return []
 
 
-def host_path(container_path: Path) -> str:
-    """
-    Resolve a container path to its host-side source by inspecting mounts.
-    Returns a human-readable string; never raises.
-    """
+def _find_best_mount(container_path: Path) -> tuple[dict, str]:
+    """Return (best_mount_dict, rel_path) for the mount covering container_path."""
     mounts = _container_mounts()
-    if not mounts:
-        return "<host path unknown: set AGENT_CONTAINER_NAME>"
-
     best: dict = {}
     best_len = 0
     for mount in mounts:
@@ -69,11 +67,18 @@ def host_path(container_path: Path) -> str:
         if str(container_path).startswith(dest) and len(dest) > best_len:
             best = mount
             best_len = len(dest)
+    rel = str(container_path)[best_len:].lstrip("/") if best_len else ""
+    return best, rel
 
+
+def host_path(container_path: Path) -> str:
+    """
+    Resolve a container path to its host-side source by inspecting mounts.
+    Returns a human-readable string; never raises.
+    """
+    best, rel = _find_best_mount(container_path)
     if not best:
-        return "<not mounted>"
-
-    rel = str(container_path)[best_len:].lstrip("/")
+        return "<host path unknown>"
     source = best.get("Source", "")
     name = best.get("Name", "")
     outside = source + ("/" + rel if rel else "")
@@ -82,11 +87,24 @@ def host_path(container_path: Path) -> str:
     return outside
 
 
+def _resolve_host_path(container_path: Path) -> Optional[str]:
+    """
+    Resolve a container path to its host filesystem path.
+    Returns None if the path is not covered by any mount or docker inspect failed.
+    Used for constructing bind-mount arguments for peer containers.
+    """
+    best, rel = _find_best_mount(container_path)
+    if not best:
+        return None
+    source = best.get("Source", "")
+    return source + ("/" + rel if rel else "")
+
+
 def log_mounts() -> None:
     """Log all container mounts at DEBUG level."""
     mounts = _container_mounts()
     if not mounts:
-        log.debug("Mount map unavailable (AGENT_CONTAINER_NAME not set or docker inspect failed)")
+        log.debug("Mount map unavailable (docker inspect '%s' failed)", AGENT_CONTAINER_NAME)
         return
     log.debug("Container mount map:")
     for m in mounts:
@@ -322,6 +340,104 @@ def sync_repo(repo: Repo, ref: AppRef) -> Optional[bool]:
 # Docker Compose helpers
 # ---------------------------------------------------------------------------
 
+def _is_self_update(app: AppManifest) -> bool:
+    """True when reconciling the steward stack itself — compose up would kill this process."""
+    return app.name == AGENT_CONTAINER_NAME
+
+
+def _get_helper_image() -> Optional[str]:
+    """Return the image of the running steward container via docker inspect."""
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "--format", "{{.Config.Image}}", AGENT_CONTAINER_NAME],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
+    """
+    Spawn a short-lived peer container that runs docker compose up after a brief delay.
+
+    When steward updates itself, calling docker compose up -d directly sends SIGTERM to
+    the running container before the replacement is created. The helper is independent of
+    steward's process, so the kill does not abort the compose operation.
+
+    Falls back to run_compose() if host paths cannot be resolved (e.g. in dev/test setups
+    where AGENT_CONTAINER_NAME does not match a real container).
+    """
+    helper_image = _get_helper_image()
+    if not helper_image:
+        log.warning(
+            "Self-update: docker inspect '%s' returned no image — falling back to direct compose",
+            AGENT_CONTAINER_NAME,
+        )
+        return run_compose(app, stack_path)
+
+    # Translate the container-internal compose file path to the host filesystem path.
+    # The helper runs as a peer container and can only see host paths.
+    container_compose_file = stack_path / app.path / app.compose_file
+    host_compose_file = _resolve_host_path(container_compose_file)
+    host_root = _resolve_host_path(GITOPS_ROOT)
+
+    if not host_compose_file or not host_root:
+        log.warning(
+            "Self-update: cannot resolve host paths (AGENT_CONTAINER_NAME='%s') — falling back to direct compose",
+            AGENT_CONTAINER_NAME,
+        )
+        return run_compose(app, stack_path)
+
+    inner_parts = [
+        "docker", "compose",
+        "-f", shlex.quote(host_compose_file),
+        "up", "-d",
+        "--remove-orphans",
+        "--pull", "always",
+    ]
+    if app.env_file:
+        host_env = _resolve_host_path(Path(app.env_file))
+        if host_env:
+            inner_parts += ["--env-file", shlex.quote(host_env)]
+        else:
+            log.warning(
+                "Self-update: cannot resolve host path for env_file '%s', omitting from helper",
+                app.env_file,
+            )
+
+    inner_cmd = " ".join(inner_parts)
+
+    helper_run = [
+        "docker", "run",
+        "--rm", "-d",
+        "-v", "/var/run/docker.sock:/var/run/docker.sock",
+        "-v", f"{host_root}:{host_root}",
+        "-e", "HOME=/tmp",
+        helper_image,
+        "sh", "-c", f"sleep 5 && {inner_cmd}",
+    ]
+
+    log.info("Self-update: spawning helper container (image=%s)", helper_image)
+    log.debug("Helper command: %s", " ".join(helper_run))
+
+    try:
+        result = subprocess.run(helper_run, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            log.error("Self-update: failed to start helper: %s", result.stderr.strip())
+            return False
+        log.info(
+            "Self-update: helper launched (%s) — steward will restart momentarily",
+            result.stdout.strip()[:12],
+        )
+        return True
+    except Exception as e:
+        log.error("Self-update: error launching helper: %s", e)
+        return False
+
+
 def run_compose(app: AppManifest, stack_path: Path) -> bool:
     """
     Run docker compose up -d --remove-orphans --pull always.
@@ -453,7 +569,10 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
         return False
     elif updated:
         log.info("App '%s' repo updated, running compose", app.name)
-        success = run_compose(app, stack_path)
+        if _is_self_update(app):
+            success = spawn_compose_helper(app, stack_path)
+        else:
+            success = run_compose(app, stack_path)
         _inc(app_state, "sync_total", "success" if success else "failed")
         if success:
             app_state["last_sync_timestamp"] = time.time()

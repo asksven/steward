@@ -16,7 +16,7 @@ services:
       # Local repo root inside the container — maps to STEWARD_DATA_DIR on the host
       GITOPS_ROOT: ${GITOPS_ROOT:-/git}
 
-      # Container name — used only for debug path logging (docker inspect)
+      # Container name — used for debug path logging and self-update helper (docker inspect)
       AGENT_CONTAINER_NAME: ${AGENT_CONTAINER_NAME:-steward}
 
       # File ownership — set to host UID/GID so files in STEWARD_DATA_DIR are not owned by root
