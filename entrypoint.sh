@@ -4,25 +4,30 @@ set -e
 STEWARD_UID=${STEWARD_UID:-0}
 STEWARD_GID=${STEWARD_GID:-$STEWARD_UID}
 
+# Non-root users get their own home so SSH can find keys under a readable path.
+# /root is drwx------ (700) — a process running as UID!=0 cannot traverse it.
+if [ "${STEWARD_UID}" != "0" ]; then
+  STEWARD_HOME=/home/steward
+else
+  STEWARD_HOME=/root
+fi
+
 echo "steward starting"
 echo "  Node:         ${GITOPS_NODE_NAME:-$(hostname)}"
 echo "  Control repo: ${CONTROL_REPO_URL}"
 echo "  Gitops root:  ${GITOPS_ROOT:-/git}"
 echo "  Running as:   ${STEWARD_UID}:${STEWARD_GID}"
+echo "  Home:         ${STEWARD_HOME}"
 echo "  Metrics port: ${METRICS_PORT:-(disabled)}"
 
-# Copy SSH credentials from staging mount to writable dir with correct root ownership
+# Copy SSH credentials from staging mount to the target home dir with correct ownership.
 # (bind-mounted files retain host UID; SSH rejects keys/config not owned by the running user)
 if [ -d /root/.ssh-host ] && ls /root/.ssh-host/* >/dev/null 2>&1; then
-  rm -rf /root/.ssh
-  mkdir -p /root/.ssh
-  cp /root/.ssh-host/* /root/.ssh/
-  chmod 700 /root/.ssh
-  chmod 600 /root/.ssh/*
-  # If running as non-root, transfer ownership so su-exec'd process can read the keys
-  if [ "${STEWARD_UID}" != "0" ]; then
-    chown -R "${STEWARD_UID}:${STEWARD_GID}" /root/.ssh
-  fi
+  mkdir -p "${STEWARD_HOME}/.ssh"
+  cp /root/.ssh-host/* "${STEWARD_HOME}/.ssh/"
+  chmod 700 "${STEWARD_HOME}/.ssh"
+  chmod 600 "${STEWARD_HOME}/.ssh/"*
+  chown -R "${STEWARD_UID}:${STEWARD_GID}" "${STEWARD_HOME}"
 fi
 
 # Ensure git root directories exist and are owned by the target user
@@ -39,16 +44,16 @@ if [ "${STEWARD_UID}" != "0" ]; then
   # Allow the non-root process to reach the Docker socket
   chmod o+rw /var/run/docker.sock
 
-  # Generate a runtime crontab that runs jobs as the target user
+  # Generate a runtime crontab that runs jobs as the target user with the correct HOME
   cat > /tmp/crontab-runtime <<EOF
-* * * * * su-exec ${STEWARD_UID}:${STEWARD_GID} python3 /app/steward.py reconcile >> /proc/1/fd/1 2>&1
-0 * * * * su-exec ${STEWARD_UID}:${STEWARD_GID} python3 /app/steward.py self-update >> /proc/1/fd/1 2>&1
+* * * * * su-exec ${STEWARD_UID}:${STEWARD_GID} env HOME=${STEWARD_HOME} python3 /app/steward.py reconcile >> /proc/1/fd/1 2>&1
+0 * * * * su-exec ${STEWARD_UID}:${STEWARD_GID} env HOME=${STEWARD_HOME} python3 /app/steward.py self-update >> /proc/1/fd/1 2>&1
 EOF
   crontab /tmp/crontab-runtime
   echo "Crontab installed"
 
   echo "Running initial reconciliation..."
-  su-exec "${STEWARD_UID}:${STEWARD_GID}" python3 /app/steward.py reconcile
+  su-exec "${STEWARD_UID}:${STEWARD_GID}" env HOME="${STEWARD_HOME}" python3 /app/steward.py reconcile
 else
   crontab /etc/cron/crontab
   echo "Crontab installed"

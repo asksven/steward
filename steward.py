@@ -284,17 +284,17 @@ def get_remote_sha(repo: Repo, ref: AppRef) -> Optional[str]:
         return None
 
 
-def sync_repo(repo: Repo, ref: AppRef) -> bool:
+def sync_repo(repo: Repo, ref: AppRef) -> Optional[bool]:
     """
     Check if remote is ahead of local. Pull if so.
-    Returns True if repo was updated, False if already up to date.
+    Returns True if updated, False if already up to date, None on error.
     """
     local_sha = repo.head.commit.hexsha
     remote_sha = get_remote_sha(repo, ref)
 
     if remote_sha is None:
         log.warning("Could not determine remote SHA, skipping sync")
-        return False
+        return None
 
     if local_sha == remote_sha:
         log.debug("Repo at %s is up to date (%s)", repo.working_dir, local_sha[:8])
@@ -315,7 +315,7 @@ def sync_repo(repo: Repo, ref: AppRef) -> bool:
         return True
     except GitCommandError as e:
         log.error("git pull/checkout failed: %s", e)
-        return False
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -462,14 +462,18 @@ def self_update() -> str:
 # Main reconciliation loop
 # ---------------------------------------------------------------------------
 
-def load_node_manifests(control_repo: Repo) -> list[AppManifest]:
-    """Load all app manifests for this node from the control repo."""
+def load_node_manifests(control_repo: Repo) -> tuple[list[AppManifest], int]:
+    """
+    Load all app manifests for this node from the control repo.
+    Returns (manifests, parse_error_count).
+    """
     node_dir = Path(control_repo.working_dir) / "nodes" / GITOPS_NODE_NAME
     if not node_dir.exists():
         log.warning("No manifest directory found for node '%s' at %s", GITOPS_NODE_NAME, node_dir)
-        return []
+        return [], 0
 
     manifests = []
+    parse_errors = 0
     for manifest_file in sorted(node_dir.glob("*.yml")):
         try:
             manifest = parse_manifest(manifest_file)
@@ -477,9 +481,10 @@ def load_node_manifests(control_repo: Repo) -> list[AppManifest]:
             log.debug("Loaded manifest: %s (enabled=%s)", manifest.name, manifest.enabled)
         except (ValueError, yaml.YAMLError) as e:
             log.error("Skipping invalid manifest %s: %s", manifest_file.name, e)
+            parse_errors += 1
 
-    log.info("Loaded %d manifest(s) for node '%s'", len(manifests), GITOPS_NODE_NAME)
-    return manifests
+    log.info("Loaded %d manifest(s) for node '%s' (%d parse error(s))", len(manifests), GITOPS_NODE_NAME, parse_errors)
+    return manifests, parse_errors
 
 
 def reconcile_app(app: AppManifest, state: dict) -> bool:
@@ -517,7 +522,10 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
     # Check for changes and sync
     updated = sync_repo(repo, app.ref)
 
-    if updated:
+    if updated is None:
+        _inc(app_state, "reconcile_total", "failed")
+        return False
+    elif updated:
         log.info("App '%s' repo updated, running compose", app.name)
         success = run_compose(app, stack_path)
         _inc(app_state, "sync_total", "success" if success else "failed")
@@ -585,10 +593,17 @@ def reconcile(mode: str = "reconcile") -> int:
         return 2
 
     control_ref = AppRef(branch=CONTROL_REPO_BRANCH)
-    sync_repo(control_repo, control_ref)
+    ctrl_sync = sync_repo(control_repo, control_ref)
+    ctrl_result = "failed" if ctrl_sync is None else ("updated" if ctrl_sync else "up_to_date")
+    _inc(state, "reconcile", "control_repo_sync_total", ctrl_result)
+    if ctrl_sync is None:
+        log.warning("Control repo sync failed; continuing with cached manifests")
 
     # Step 2: load manifests for this node
-    manifests = load_node_manifests(control_repo)
+    manifests, parse_errors = load_node_manifests(control_repo)
+    if parse_errors:
+        _inc(state, "reconcile", "manifest_parse_errors", by=parse_errors)
+
     if not manifests:
         log.info("No apps to reconcile")
         end_time = time.time()
@@ -614,7 +629,13 @@ def reconcile(mode: str = "reconcile") -> int:
             _inc(app_state, "reconcile_total", "skipped")
             results[app.name] = "disabled"
             continue
-        success = reconcile_app(app, state)
+        try:
+            success = reconcile_app(app, state)
+        except Exception as e:
+            log.error("Unexpected error reconciling app '%s': %s", app.name, e, exc_info=True)
+            app_state = state.setdefault("apps", {}).setdefault(app.name, {})
+            _inc(app_state, "reconcile_total", "failed")
+            success = False
         results[app.name] = "ok" if success else "failed"
 
     # Summary

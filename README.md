@@ -62,22 +62,41 @@ docker push ghcr.io/<you>/steward:latest
 
 See the companion **homelab-gitops** README for the control repo structure. Create a directory for your node under `nodes/` and add app manifests.
 
-### 3. Deploy the agent on a node
+### 3. Create the .env file
 
-Create a `.env` file next to `docker-compose.yml` with at minimum:
+Create a `.env` file next to `docker-compose.yml`:
 
 ```env
 CONTROL_REPO_URL=https://oauth2:<token>@github.com/you/homelab-gitops
 GITOPS_NODE_NAME=node1.lan
+AGENT_IMAGE=ghcr.io/<you>/steward:latest
+STEWARD_DATA_DIR=/opt/steward-data
 ```
 
-`GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo. Then:
+`GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo.
+
+### 4. Run as a non-root user (recommended)
+
+By default steward runs as root, which means files written to `STEWARD_DATA_DIR` are owned by root. Add your host UID and GID so the files are owned by your normal user:
+
+```bash
+echo "STEWARD_UID=$(id -u)" >> .env
+echo "STEWARD_GID=$(id -g)" >> .env
+```
+
+The entrypoint creates `/home/steward` inside the container owned by that UID. SSH key files are placed there automatically (see step 5).
+
+### 5. Set up SSH authentication (if using SSH repo URLs)
+
+Skip this step if all your repos use HTTPS URLs. If any repo uses an SSH URL (`git@github.com:...`), follow the [SSH key](#ssh-key) setup below before starting the container.
+
+### 6. Start the agent
 
 ```bash
 docker compose up -d
 ```
 
-The agent will immediately reconcile on startup, then run on the cron schedule.
+The agent reconciles immediately on startup, then runs on the cron schedule.
 
 ---
 
@@ -149,33 +168,29 @@ environment:
 
 ### SSH key
 
-Create an SSH config file on the host that maps each Git host to its key:
+The container home directory for SSH keys depends on `STEWARD_UID`:
 
-```
-# ~/.ssh/config
-Host gitlab.com
-  IdentityFile ~/.ssh/id_rsa-gitlab
-  StrictHostKeyChecking yes
+| `STEWARD_UID` | SSH home inside container |
+|---|---|
+| `0` (root, default) | `/root/.ssh/` |
+| any other value | `/home/steward/.ssh/` |
 
-Host github.com
-  IdentityFile ~/.ssh/id_rsa-github
-  StrictHostKeyChecking yes
-```
-
-Create a container-specific SSH config on the host referencing the container paths (not `~/.ssh/`):
+**Step 1** — create a container-specific SSH config on the host. The `IdentityFile` paths must point to the container-internal SSH home, not `~/.ssh/`. Using the recommended non-root setup:
 
 ```
 # ~/steward-ssh-config
 Host gitlab.com
-  IdentityFile /root/.ssh/id_rsa-gitlab
+  IdentityFile /home/steward/.ssh/id_rsa-gitlab
   StrictHostKeyChecking yes
 
 Host github.com
-  IdentityFile /root/.ssh/id_rsa-github
+  IdentityFile /home/steward/.ssh/id_rsa-github
   StrictHostKeyChecking yes
 ```
 
-Then create a `docker-compose.override.yml` mounting everything into the staging directory `/root/.ssh-host/`:
+If you are running as root (`STEWARD_UID=0`), use `/root/.ssh/` instead.
+
+**Step 2** — create a `docker-compose.override.yml` that mounts your key files and the config into the staging directory `/root/.ssh-host/`:
 
 ```yaml
 services:
@@ -187,7 +202,9 @@ services:
       - ~/.ssh/known_hosts:/root/.ssh-host/known_hosts:ro
 ```
 
-Docker Compose merges this automatically. The entrypoint copies the files to `/root/.ssh/` with correct root ownership and permissions on startup — bind-mounted files retain the host user's UID which SSH rejects. Use SSH URLs in your manifests:
+Docker Compose merges this file automatically. On startup the entrypoint copies everything from `/root/.ssh-host/` into the container user's SSH home (`/home/steward/.ssh/` or `/root/.ssh/`) with correct ownership and permissions — bind-mounted files retain the host user's UID, which SSH rejects if it does not match the running process.
+
+**Step 3** — use SSH URLs in your manifests:
 
 ```yaml
 repo: git@github.com:you/arr-stack.git
