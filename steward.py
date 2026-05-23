@@ -13,12 +13,16 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
 import yaml
 from git import GitCommandError, InvalidGitRepositoryError, Repo
+
+from state_store import load_state as load_sqlite_state
+from state_store import save_state as save_sqlite_state
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -132,20 +136,32 @@ def strip_url_credentials(url: str) -> str:
 
 
 def _load_metrics_state() -> dict:
-    try:
-        return json.loads(METRICS_STATE_FILE.read_text())
-    except Exception:
-        return {}
+    return load_sqlite_state(DB_FILE, GITOPS_NODE_NAME)
 
 
 def _save_metrics_state(state: dict) -> None:
     try:
-        METRICS_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = METRICS_STATE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state))
-        tmp.rename(METRICS_STATE_FILE)
+        save_sqlite_state(DB_FILE, GITOPS_NODE_NAME, state)
     except Exception as e:
         log.warning("Failed to save metrics state: %s", e)
+
+
+def _maybe_warn_legacy_json_state() -> None:
+    if not LEGACY_METRICS_STATE_FILE.exists():
+        return
+    if LEGACY_NOTICE_MARKER_FILE.exists():
+        return
+
+    log.info(
+        "Legacy metrics state file detected at %s; SQLite state at %s is authoritative and starts fresh by design",
+        LEGACY_METRICS_STATE_FILE,
+        DB_FILE,
+    )
+    try:
+        LEGACY_NOTICE_MARKER_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LEGACY_NOTICE_MARKER_FILE.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    except Exception:
+        pass
 
 
 def _inc(d: dict, *keys, by: int = 1) -> None:
@@ -165,7 +181,9 @@ CONTROL_REPO_URL    = os.environ.get("CONTROL_REPO_URL", "")
 CONTROL_REPO_BRANCH = os.environ.get("CONTROL_REPO_BRANCH", "main")
 CONTROL_REPO_DIR    = GITOPS_ROOT / "control"
 STACKS_DIR          = GITOPS_ROOT / "stacks"
-METRICS_STATE_FILE  = GITOPS_ROOT / "metrics" / "state.json"
+DB_FILE             = GITOPS_ROOT / "steward.db"
+LEGACY_METRICS_STATE_FILE = GITOPS_ROOT / "metrics" / "state.json"
+LEGACY_NOTICE_MARKER_FILE = GITOPS_ROOT / "metrics" / ".legacy_json_ignored"
 
 # ---------------------------------------------------------------------------
 # App manifest schema
@@ -191,6 +209,25 @@ class AppManifest:
     env_file: Optional[str]
     enabled: bool
     source_file: Path
+
+
+class SyncStatus(Enum):
+    SYNCED = "Synced"
+    OUT_OF_SYNC = "OutOfSync"
+    UNKNOWN = "Unknown"
+
+
+@dataclass
+class CheckResult:
+    status: SyncStatus
+    local_sha: Optional[str] = None
+    remote_sha: Optional[str] = None
+
+
+@dataclass
+class SyncResult:
+    success: bool
+    message: str = ""
 
 
 def parse_manifest(manifest_path: Path) -> AppManifest:
@@ -277,14 +314,18 @@ def ensure_repo(url: str, local_path: Path, branch: Optional[str] = None, tag: O
     return repo
 
 
-def get_remote_sha(repo: Repo, ref: AppRef) -> Optional[str]:
-    """Fetch and return the remote SHA for a branch or tag."""
+def fetch_ref(repo: Repo, ref: AppRef) -> bool:
+    """Fetch refs from origin so SHA comparison can run against fresh remote state."""
     try:
         repo.remotes.origin.fetch(tags=bool(ref.tag))
+        return True
     except GitCommandError as e:
         log.error("git fetch failed: %s", e)
-        return None
+        return False
 
+
+def get_remote_sha(repo: Repo, ref: AppRef) -> Optional[str]:
+    """Return the remote SHA for a branch or tag after refs were fetched."""
     try:
         if ref.branch:
             return repo.remotes.origin.refs[ref.branch].commit.hexsha
@@ -302,29 +343,30 @@ def get_remote_sha(repo: Repo, ref: AppRef) -> Optional[str]:
         return None
 
 
-def sync_repo(repo: Repo, ref: AppRef) -> Optional[bool]:
-    """
-    Check if remote is ahead of local. Pull if so.
-    Returns True if updated, False if already up to date, None on error.
-    """
+def check_app(repo: Repo, ref: AppRef) -> CheckResult:
+    """Compare local and remote SHAs and return sync status."""
     local_sha = repo.head.commit.hexsha
     remote_sha = get_remote_sha(repo, ref)
 
     if remote_sha is None:
-        log.warning("Could not determine remote SHA, skipping sync")
-        return None
+        return CheckResult(status=SyncStatus.UNKNOWN, local_sha=local_sha)
 
     if local_sha == remote_sha:
-        log.debug("Repo at %s is up to date (%s)", repo.working_dir, local_sha[:8])
-        return False
+        return CheckResult(
+            status=SyncStatus.SYNCED,
+            local_sha=local_sha,
+            remote_sha=remote_sha,
+        )
 
-    log.info(
-        "Repo %s has changes: %s → %s",
-        repo.working_dir,
-        local_sha[:8],
-        remote_sha[:8],
+    return CheckResult(
+        status=SyncStatus.OUT_OF_SYNC,
+        local_sha=local_sha,
+        remote_sha=remote_sha,
     )
 
+
+def apply_ref(repo: Repo, ref: AppRef) -> bool:
+    """Apply remote changes for a branch/tag to local working tree."""
     try:
         if ref.branch:
             repo.remotes.origin.pull(ref.branch)
@@ -333,7 +375,41 @@ def sync_repo(repo: Repo, ref: AppRef) -> Optional[bool]:
         return True
     except GitCommandError as e:
         log.error("git pull/checkout failed: %s", e)
+        return False
+
+
+def sync_repo(repo: Repo, ref: AppRef) -> Optional[bool]:
+    """
+    Check if remote is ahead of local. Pull if so.
+    Returns True if updated, False if already up to date, None on error.
+    """
+    if not fetch_ref(repo, ref):
+        log.warning("Could not determine remote SHA, skipping sync")
         return None
+
+    check = check_app(repo, ref)
+
+    if check.status == SyncStatus.UNKNOWN:
+        log.warning("Could not determine remote SHA, skipping sync")
+        return None
+
+    if check.status == SyncStatus.SYNCED:
+        local_sha = check.local_sha or ""
+        log.debug("Repo at %s is up to date (%s)", repo.working_dir, local_sha[:8])
+        return False
+
+    local_sha = check.local_sha or ""
+    remote_sha = check.remote_sha or ""
+    log.info(
+        "Repo %s has changes: %s → %s",
+        repo.working_dir,
+        local_sha[:8],
+        remote_sha[:8],
+    )
+
+    if not apply_ref(repo, ref):
+        return None
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +578,23 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
         return False
 
 
+def sync_app(app: AppManifest, repo: Repo, stack_path: Path) -> SyncResult:
+    """Apply git changes and run compose for one app."""
+    if not apply_ref(repo, app.ref):
+        return SyncResult(success=False, message="git_apply_failed")
+
+    log.info("App '%s' repo updated, running compose", app.name)
+    if _is_self_update(app):
+        success = spawn_compose_helper(app, stack_path)
+    else:
+        success = run_compose(app, stack_path)
+
+    if not success:
+        return SyncResult(success=False, message="compose_failed")
+
+    return SyncResult(success=True, message="synced")
+
+
 # ---------------------------------------------------------------------------
 # Main reconciliation loop
 # ---------------------------------------------------------------------------
@@ -563,29 +656,53 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
         _inc(app_state, "reconcile_total", "failed")
         return False
 
-    # Check for changes and sync
-    updated = sync_repo(repo, app.ref)
-
-    if updated is None:
+    if not fetch_ref(repo, app.ref):
         _inc(app_state, "reconcile_total", "failed")
         return False
-    elif updated:
-        log.info("App '%s' repo updated, running compose", app.name)
-        if _is_self_update(app):
-            success = spawn_compose_helper(app, stack_path)
-        else:
-            success = run_compose(app, stack_path)
-        _inc(app_state, "sync_total", "success" if success else "failed")
-        if success:
-            app_state["last_sync_timestamp"] = time.time()
-            _inc(app_state, "reconcile_total", "success")
-        else:
-            _inc(app_state, "reconcile_total", "failed")
-        return success
-    else:
+
+    check = check_app(repo, app.ref)
+
+    if check.status == SyncStatus.UNKNOWN:
+        _inc(app_state, "reconcile_total", "failed")
+        return False
+
+    if check.status == SyncStatus.SYNCED:
         log.info("App '%s' is up to date, no action needed", app.name)
         _inc(app_state, "reconcile_total", "success")
         return True
+
+    local_sha = check.local_sha or ""
+    remote_sha = check.remote_sha or ""
+    log.info(
+        "Repo %s has changes: %s → %s",
+        repo.working_dir,
+        local_sha[:8],
+        remote_sha[:8],
+    )
+
+    sync = sync_app(app, repo, stack_path)
+    _inc(app_state, "sync_total", "success" if sync.success else "failed")
+    state.setdefault("_operations", []).append(
+        {
+            "app": app.name,
+            "node": GITOPS_NODE_NAME,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "trigger": "git_change",
+            "from_sha": local_sha,
+            "to_sha": remote_sha,
+            "sync_status": "Synced" if sync.success else "Failed",
+            "health_status": None,
+            "duration_s": None,
+            "message": sync.message,
+        }
+    )
+    if sync.success:
+        app_state["last_sync_timestamp"] = time.time()
+        _inc(app_state, "reconcile_total", "success")
+    else:
+        _inc(app_state, "reconcile_total", "failed")
+    return sync.success
 
 
 def reconcile() -> int:
@@ -603,6 +720,7 @@ def reconcile() -> int:
 
     GITOPS_ROOT.mkdir(parents=True, exist_ok=True)
     STACKS_DIR.mkdir(parents=True, exist_ok=True)
+    _maybe_warn_legacy_json_state()
 
     log.info(
         "Starting reconciliation | node=%s root=%s",

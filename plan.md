@@ -39,7 +39,7 @@ the "like ArgoCD" claim.
 Write the current status for all apps to `nodes/<hostname>/status.json` in the control repo
 after each cycle (see item 2.1).
 
-**Open questions:**
+**Open questions:** resolved.
 - What is the correct `OutOfSync` definition when `sync_policy: manual` is set (item 1.3)?
   Should steward report `OutOfSync` but never act, or use a distinct `Pending` status?
 - When a manifest is newly added (first-ever deploy), should the initial status be `Unknown`
@@ -357,12 +357,19 @@ if status == OutOfSync and app.sync_policy == "auto":
 ```
 
 **Open questions:**
-- Should `check_app` and `sync_app` write directly to the SQLite state, or return result
-  objects that the orchestrator persists? Returning result objects is more testable and keeps
-  I/O out of the business logic.
-- `check_app` currently involves a git fetch which has side effects (modifies the local repo).
-  Should the fetch be a separate step, making `check_app` a pure SHA comparison against the
-  already-fetched state?
+
+**Decisions (2026-05-23):**
+- `check_app` and `sync_app` return result objects; `reconcile_app` is the only place that
+  persists metrics/state updates. This keeps phase logic testable and side effects centralized.
+- Git fetch is an explicit step before `check_app`, so `check_app` remains a pure
+  local-vs-remote SHA comparison over already-fetched refs.
+- Scope allows only low-risk tweaks needed to keep phase boundaries coherent; no new user-facing
+  behavior is introduced as part of 2.3 itself.
+
+**Implementation status:**
+- Refactor landed in `steward.py` with `fetch_ref` -> `check_app` -> `sync_app` orchestration.
+- Existing `sync_repo` remains as a compatibility wrapper for call sites that still need the
+  old tri-state return (`True` updated / `False` up-to-date / `None` error).
 
 **Complexity:** Low-medium — refactor only, no new external behaviour. This is a prerequisite
 for items 1.2, 1.3, and 1.4 and should be done first within Goal 1.
@@ -488,14 +495,17 @@ CREATE TABLE app_manifest (
 );
 ```
 
-**Open questions:**
-- Should the metrics state (currently a separate JSON file used by `metrics_server.py`) be
-  merged into SQLite, or should `metrics_server.py` continue to read from a separate file?
-  Merging is cleaner; `metrics_server.py` would query SQLite directly.
-- Migration: existing deployments have a JSON state file. Should steward auto-migrate on first
-  start with the new version, or require a manual migration step? Auto-migration is friendlier
-  but adds code; a clean-slate start (drop and recreate) is acceptable given that state is
-  ephemeral observability data, not configuration.
+**Open questions:** resolved.
+
+**Decisions (2026-05-23):**
+- Metrics state is merged into SQLite and `metrics_server.py` reads SQLite directly.
+- Migration mode is clean-slate: old JSON state is ignored (no auto-import, no manual import flow).
+
+**Implementation status:**
+- `steward.py` now persists reconcile/app state in `steward.db` and initializes SQLite schema on demand.
+- `metrics_server.py` now reads metrics input from SQLite instead of `metrics/state.json`.
+- A one-time startup info log is emitted when a legacy `metrics/state.json` file is detected,
+  explicitly stating that SQLite is authoritative and starts fresh by design.
 
 **Complexity:** Medium — the schema is simple but migrating `metrics_server.py` and the
 reconcile loop to write SQLite instead of JSON requires touching several parts of the codebase.

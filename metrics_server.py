@@ -6,13 +6,27 @@ in Prometheus text exposition format.
 """
 
 import http.server
-import json
 import os
+import socket
 import sys
 from pathlib import Path
 
-STATE_FILE = Path(os.environ.get("GITOPS_ROOT", "/git")) / "metrics" / "state.json"
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 9101
+from state_store import load_state as load_sqlite_state
+
+DB_FILE = Path(os.environ.get("GITOPS_ROOT", "/git")) / "steward.db"
+NODE_NAME = os.environ.get("GITOPS_NODE_NAME", socket.gethostname())
+
+
+def _resolve_port(argv: list[str]) -> int:
+    if len(argv) <= 1:
+        return 9101
+    try:
+        return int(argv[1])
+    except ValueError:
+        return 9101
+
+
+PORT = _resolve_port(sys.argv)
 
 
 def _labels(**kw) -> str:
@@ -90,11 +104,15 @@ def format_metrics(state: dict) -> str:
     return "\n".join(lines)
 
 
+def _load_state_from_db() -> dict:
+    return load_sqlite_state(DB_FILE, NODE_NAME, require_data=True)
+
+
 class MetricsHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/metrics":
             try:
-                state = json.loads(STATE_FILE.read_text())
+                state = _load_state_from_db()
                 body = format_metrics(state).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

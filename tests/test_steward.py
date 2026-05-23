@@ -296,3 +296,107 @@ def test_spawn_compose_helper_uses_explicit_project_name(
     assert result is True
     helper_shell = seen_helper_cmd[-1]
     assert "--project-name steward" in helper_shell
+
+
+def test_check_app_returns_synced() -> None:
+    repo = MagicMock()
+    repo.head.commit.hexsha = "abc123"
+    repo.remotes.origin.refs = {"main": MagicMock(commit=MagicMock(hexsha="abc123"))}
+
+    result = steward.check_app(repo, steward.AppRef(branch="main"))
+
+    assert result.status == steward.SyncStatus.SYNCED
+    assert result.local_sha == "abc123"
+    assert result.remote_sha == "abc123"
+
+
+def test_check_app_returns_out_of_sync() -> None:
+    repo = MagicMock()
+    repo.head.commit.hexsha = "abc123"
+    repo.remotes.origin.refs = {"main": MagicMock(commit=MagicMock(hexsha="def456"))}
+
+    result = steward.check_app(repo, steward.AppRef(branch="main"))
+
+    assert result.status == steward.SyncStatus.OUT_OF_SYNC
+    assert result.local_sha == "abc123"
+    assert result.remote_sha == "def456"
+
+
+def test_sync_app_returns_git_apply_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = steward.AppManifest(
+        version=1,
+        name="demo",
+        repo="https://example.com/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    monkeypatch.setattr(steward, "apply_ref", lambda _repo, _ref: False)
+
+    result = steward.sync_app(app, MagicMock(), Path("/tmp/demo"))
+
+    assert result.success is False
+    assert result.message == "git_apply_failed"
+
+
+def test_sync_app_returns_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = steward.AppManifest(
+        version=1,
+        name="demo",
+        repo="https://example.com/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    monkeypatch.setattr(steward, "apply_ref", lambda _repo, _ref: True)
+    monkeypatch.setattr(steward, "_is_self_update", lambda _app: False)
+    monkeypatch.setattr(steward, "run_compose", lambda _app, _stack: True)
+
+    result = steward.sync_app(app, MagicMock(), Path("/tmp/demo"))
+
+    assert result.success is True
+    assert result.message == "synced"
+
+
+def test_sqlite_state_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(steward, "DB_FILE", tmp_path / "steward.db")
+
+    state = {
+        "node": steward.GITOPS_NODE_NAME,
+        "reconcile": {
+            "last_timestamp": 100.0,
+            "last_duration_seconds": 2.5,
+            "total": {"success": 3, "partial_failure": 1, "fatal": 0},
+            "control_repo_sync_total": {"up_to_date": 5, "updated": 2, "failed": 1},
+            "manifest_parse_errors": 4,
+        },
+        "apps": {
+            "demo": {
+                "repo": "https://example.com/repo.git",
+                "ref": "main",
+                "ref_type": "branch",
+                "enabled": True,
+                "last_reconcile_timestamp": 101.0,
+                "last_sync_timestamp": 102.0,
+                "reconcile_total": {"success": 7, "failed": 2, "skipped": 1},
+                "sync_total": {"success": 3, "failed": 1},
+            }
+        },
+    }
+
+    steward._save_metrics_state(state)
+    loaded = steward._load_metrics_state()
+
+    assert loaded["node"] == steward.GITOPS_NODE_NAME
+    assert loaded["reconcile"]["total"]["success"] == 3
+    assert loaded["reconcile"]["control_repo_sync_total"]["updated"] == 2
+    assert loaded["apps"]["demo"]["reconcile_total"]["failed"] == 2
+    assert loaded["apps"]["demo"]["sync_total"]["success"] == 3

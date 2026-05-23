@@ -426,6 +426,30 @@ Notes:
 
 ---
 
+## Migration (3.1 JSON state to SQLite)
+
+As of 3.1, steward stores runtime state in SQLite at:
+
+```text
+<GITOPS_ROOT>/steward.db
+```
+
+This replaces the old JSON metrics state file:
+
+```text
+<GITOPS_ROOT>/metrics/state.json
+```
+
+Migration behavior is intentionally **fresh-start**:
+
+- old `metrics/state.json` is ignored
+- no JSON import is performed
+- counters and timestamps begin from the first reconcile after upgrade
+
+If a legacy JSON file is detected, steward logs an info message once to make this explicit.
+
+---
+
 ## Releasing
 
 The GitHub Actions workflow (`build.yml`) triggers on two events:
