@@ -244,12 +244,12 @@ docker run --rm -d \
   -v <STEWARD_DATA_DIR>:<STEWARD_DATA_DIR> \
   -e HOME=/tmp \
   <current-steward-image> \
-  sh -c "sleep 5 && docker compose -f <compose-file> up -d --remove-orphans --pull always"
+  sh -c "sleep 5 && docker compose --project-name <app.name> -f <compose-file> up -d --remove-orphans --pull always"
 ```
 
 The helper is a peer container, independent of steward's process. When Docker Compose stops steward, the helper is unaffected and creates the new container cleanly. The 5-second delay lets the old container exit fully before `compose up` runs.
 
-If host paths cannot be resolved (e.g. `AGENT_CONTAINER_NAME` is wrong or docker inspect fails), steward falls back to calling `docker compose up -d` directly — which will kill itself, but `restart: unless-stopped` ensures the container comes back up on the next Docker restart cycle.
+If host paths cannot be resolved (e.g. `AGENT_CONTAINER_NAME` is wrong or docker inspect fails), steward falls back to calling `docker compose --project-name <app.name> up -d` directly — which will kill itself, but `restart: unless-stopped` ensures the container comes back up on the next Docker restart cycle.
 
 ### Bootstrap
 
@@ -362,10 +362,67 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
    ├── enabled: false → skip
    ├── stack repo not cloned → clone
    ├── git fetch stack repo
-   │   ├── up to date → skip
-   │   └── changed → git pull/checkout → docker compose up -d --remove-orphans --pull always
+  │   ├── up to date → skip
+  │   └── changed → git pull/checkout → docker compose --project-name <app.name> up -d --remove-orphans --pull always
    └── log result
 ```
+
+---
+
+## Migration (pre-2.5 to 2.5+)
+
+Item 2.5 makes steward pass an explicit compose project name on all compose runs:
+
+```bash
+docker compose --project-name <app.name> ...
+```
+
+### Do you need migration steps?
+
+In most deployments: no.
+
+- steward has always cloned stacks to `STEWARD_DATA_DIR/stacks/<app.name>`
+- older compose runs used the working directory name as project name
+- that directory name is usually the same as `<app.name>`
+
+So for the common case, project name stays unchanged and rollout is seamless.
+
+### When manual cleanup may be needed
+
+Cleanup is only needed if your old effective compose project name differs from `app.name`
+(for example older manual compose runs from another directory).
+
+Symptoms:
+
+- `docker compose ls` shows both an old project and the new `app.name` project
+- duplicate containers/networks/volumes for one app
+
+### Safe cleanup procedure
+
+1. Let steward run one reconcile cycle after upgrade.
+2. Confirm the new project is healthy:
+
+```bash
+docker compose --project-name <app.name> -f <compose-file> ps
+```
+
+3. Stop and remove the old project once the new one is confirmed:
+
+```bash
+docker compose --project-name <old-project-name> -f <compose-file> down --remove-orphans
+```
+
+4. Verify only the expected project remains:
+
+```bash
+docker compose ls
+```
+
+Notes:
+
+- no manifest schema changes are required for 2.5
+- no env var changes are required for 2.5
+- steward's own stack uses the same explicit project-name logic in helper mode
 
 ---
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -228,3 +229,70 @@ def test_spawn_compose_helper_falls_back_when_host_path_lookup_fails(
 
     assert result is True
     assert fallback_called["value"] is True
+
+
+def test_run_compose_uses_explicit_project_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+
+    app = steward.AppManifest(
+        version=1,
+        name="demo",
+        repo="https://example.com/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    seen_cmd: list[str] = []
+
+    def _fake_run(cmd, **_kwargs):
+        seen_cmd[:] = cmd
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(steward.subprocess, "run", _fake_run)
+
+    result = steward.run_compose(app, tmp_path)
+
+    assert result is True
+    assert "--project-name" in seen_cmd
+    assert seen_cmd[seen_cmd.index("--project-name") + 1] == "demo"
+
+
+def test_spawn_compose_helper_uses_explicit_project_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = steward.AppManifest(
+        version=1,
+        name="steward",
+        repo="https://example.com/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    monkeypatch.setattr(steward, "_get_helper_image", lambda: "ghcr.io/test/steward:latest")
+    monkeypatch.setattr(steward, "_resolve_host_path", lambda p: str(p))
+
+    seen_helper_cmd: list[str] = []
+
+    def _fake_run(cmd, **_kwargs):
+        seen_helper_cmd[:] = cmd
+        return SimpleNamespace(returncode=0, stdout="container-id", stderr="")
+
+    monkeypatch.setattr(steward.subprocess, "run", _fake_run)
+
+    result = steward.spawn_compose_helper(app, Path("/git/stacks/steward"))
+
+    assert result is True
+    helper_shell = seen_helper_cmd[-1]
+    assert "--project-name steward" in helper_shell

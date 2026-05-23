@@ -393,6 +393,7 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
 
     inner_parts = [
         "docker", "compose",
+        "--project-name", shlex.quote(app.name),
         "-f", shlex.quote(host_compose_file),
         "up", "-d",
         "--remove-orphans",
@@ -440,7 +441,7 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
 
 def run_compose(app: AppManifest, stack_path: Path) -> bool:
     """
-    Run docker compose up -d --remove-orphans --pull always.
+    Run docker compose with an explicit project name, then up -d --remove-orphans --pull always.
     Returns True on success, False on failure.
     """
     compose_file = stack_path / app.path / app.compose_file
@@ -453,6 +454,7 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
 
     cmd = [
         "docker", "compose",
+        "--project-name", app.name,
         "-f", str(compose_file),
         "up", "-d",
         "--remove-orphans",
