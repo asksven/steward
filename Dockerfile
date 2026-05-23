@@ -5,7 +5,7 @@ ARG UV_VERSION=0.8.4
 # Install system dependencies
 RUN apk add --no-cache \
     git=~2 \
-    docker-cli=~28 \
+    docker-cli=~29 \
     docker-cli-compose=~2 \
     openssh-client=~10 \
     su-exec=~0.3 && \
