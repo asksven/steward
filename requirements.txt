@@ -1,7 +1,6 @@
 # This file is generated from requirements.in and pinned for reproducible builds.
 # Update with: uv pip compile requirements.in -o requirements.txt
-
 gitdb==4.0.12
-gitpython==3.1.44
-pyyaml==6.0.2
+gitpython==3.1.50
+pyyaml==6.0.3
 smmap==5.0.2
