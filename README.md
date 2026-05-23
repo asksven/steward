@@ -4,7 +4,7 @@ A lightweight, per-node GitOps reconciler for Docker Compose stacks, inspired by
 
 ## Concept
 
-One container runs on each node. It watches a central **control repo** for app manifests, and per-app **stack repos** for compose file changes. When drift is detected it runs `docker compose up -d --remove-orphans`. The agent also checks for updates to its own image and restarts itself when a new version is pushed.
+One container runs on each node. It watches a central **control repo** for app manifests, and per-app **stack repos** for compose file changes. When drift is detected it runs `docker compose up -d --remove-orphans`. Steward can reconcile its own stack as part of normal GitOps flow.
 
 ```
 GitHub: homelab-gitops/          ← app manifests (what runs where)
@@ -15,7 +15,6 @@ On each node:
   steward (container)
     crond
       every minute  → reconcile stacks
-      every hour    → self-update agent image
 ```
 
 ---
@@ -27,12 +26,12 @@ steward/
   steward.py          # Main steward logic
   Dockerfile             # Agent container image
   docker-compose.yml     # Deploy the agent on a node
-  crontab                # Cron schedule (reconcile + self-update)
+  crontab                # Cron schedule (reconcile)
   entrypoint.sh          # Container entrypoint
   examples.yml           # Example app manifests
   .github/
     workflows/
-      build.yml          # Build and push image to GHCR on push to main or version tag
+      build.yml          # Lint + test + build and push image to GHCR
 ```
 
 ---
@@ -49,7 +48,7 @@ steward/
 
 ### 1. Build and push the agent image
 
-Update `.github/workflows/build.yml` with your registry path (the `IMAGE_NAME` env var), then push to `main`. The workflow builds and pushes automatically to GHCR.
+Update `.github/workflows/build.yml` with your registry path (the `IMAGE_NAME` env var), then push to `main`. The workflow runs lint and tests first, then builds and pushes to GHCR only if both pass.
 
 See the [Releasing](#releasing) section for what image tags are produced and which one to use in your `.env`.
 
@@ -92,6 +91,30 @@ docker compose up -d
 ```
 
 The agent reconciles immediately on startup, then runs on the cron schedule.
+
+---
+
+## Development and quality checks
+
+Steward uses **uv** for local dependency management and developer commands.
+
+```bash
+uv venv
+uv pip install -r requirements.txt pytest ruff
+uv run pytest -v --tb=short
+uv run ruff check steward.py metrics_server.py tests
+```
+
+Runtime dependencies are managed with:
+
+- `requirements.in` for direct dependencies
+- `requirements.txt` for pinned, reproducible installs
+
+To refresh pinned versions:
+
+```bash
+uv pip compile requirements.in -o requirements.txt
+```
 
 ---
 

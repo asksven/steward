@@ -1,1 +1,14 @@
 .env
+
+# Python/cache artifacts
+__pycache__/
+*.py[cod]
+
+# Local tooling artifacts
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Optional uv lock file (requirements.txt is authoritative here)
+uv.lock

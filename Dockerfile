@@ -6,13 +6,16 @@ RUN apk add --no-cache \
     docker-cli \
     docker-cli-compose \
     openssh-client \
-    su-exec \
-    && pip install --no-cache-dir \
-    gitpython \
-    pyyaml
+    su-exec
+
+# Install Python package manager and pinned runtime dependencies
+RUN pip install --no-cache-dir uv
+
+WORKDIR /app
+COPY requirements.txt .
+RUN uv pip install --system --no-cache-dir -r requirements.txt
 
 # Install app
-WORKDIR /app
 COPY steward.py .
 COPY metrics_server.py .
 

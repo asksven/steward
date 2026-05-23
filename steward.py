@@ -18,7 +18,7 @@ from typing import Optional
 from urllib.parse import urlparse, urlunparse
 
 import yaml
-from git import Repo, GitCommandError, InvalidGitRepositoryError
+from git import GitCommandError, InvalidGitRepositoryError, Repo
 
 # ---------------------------------------------------------------------------
 # Logging
