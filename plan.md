@@ -47,6 +47,16 @@ after each cycle (see item 2.1).
 - Should `Disabled` be a sync status or a separate field in the state? Keeping it separate
   avoids conflating operational state with sync state.
 
+**Decisions (2026-05-23):**
+- `sync_policy: manual` reports `OutOfSync` and skips apply.
+- Newly added apps start as `Unknown` until a successful comparison is possible.
+- `Disabled` is exposed as a sync status value for operational clarity in metrics.
+
+**Implementation status:**
+- Steward now persists per-app sync status in SQLite (`Synced`, `OutOfSync`, `Unknown`, `Disabled`).
+- `/metrics` now exposes `steward_app_sync_status{app,node,status}` as a one-hot gauge per status label.
+- Remaining part for full 1.1 parity: control-repo status writeback (`nodes/<hostname>/status.json`) from item 2.1.
+
 **Complexity:** Medium — requires items 3.1 (SQLite state) and 2.1 (status writeback) as
 foundations, but the status logic itself is straightforward once those exist.
 
@@ -79,7 +89,7 @@ or `restart: on-failure` with exit 0) are excluded from the health check. Persis
 status alongside sync status in SQLite and expose as
 `steward_app_health_status{app, node, status}`.
 
-**Open questions:**
+**Open questions:** resolved.
 - What is the right `Progressing` window default? 30 seconds is reasonable for most homelab
   stacks but may be too short for slow-starting services (databases, Jellyfin indexing). Should
   this be configurable at the manifest level (`health_check_delay_seconds`)?
@@ -91,6 +101,20 @@ status alongside sync status in SQLite and expose as
   with item 1.3 (sync policy).
 - How do we classify a service that is restarting? `docker compose ps` may show `running`
   between restarts. Should we track restart count delta as a `Degraded` signal?
+
+**Decisions (2026-05-23):**
+- `Progressing` default delay is 30 seconds.
+- Delay is configurable per app via manifest field `health_check_delay_seconds`.
+- Services without Docker healthcheck are treated as healthy when compose state is `running`.
+- `Degraded` triggers automatic re-apply only when `sync_policy=auto`.
+- Services in `restarting` state are classified as `Degraded`.
+
+**Implementation status:**
+- Manifest parser accepts `health_check_delay_seconds` and validates integer bounds.
+- Reconcile persists `health_status` per app in SQLite and updates it on each cycle.
+- Health status transitions are implemented: `Progressing` after successful apply, then `Healthy|Degraded|Unknown` from `docker compose ps --format json` after delay.
+- `/metrics` exposes `steward_app_health_status{app,node,status}` as one-hot gauge labels.
+- Policy gating is enforced: degraded auto-reapply runs only for apps with `sync_policy=auto`.
 
 **Complexity:** Medium — requires parsing `docker compose ps --format json` output and defining
 the health classification rules. The `Progressing` window adds a timing concern to the otherwise
@@ -123,7 +147,7 @@ call `docker compose up`. The only way to trigger a sync in manual mode is via a
 `steward sync <app>` CLI command (out of scope for this item) or by temporarily setting
 `sync_policy: auto` in the manifest.
 
-**Open questions:**
+**Open questions:** resolved.
 - Should `manual` mode also suppress the self-heal trigger (item 1.4)? i.e. if a container
   crashes, does `sync_policy: manual` mean steward never heals it either? Likely yes — the
   operator has opted out of automatic changes. But this should be an explicit decision.
@@ -132,6 +156,18 @@ call `docker compose up`. The only way to trigger a sync in manual mode is via a
   node default.
 - What notification behaviour should accompany `OutOfSync` in manual mode? Should it trigger
   the failure notification (item 3.3) or a distinct `drift_detected` notification type?
+
+**Decisions (2026-05-23):**
+- `sync_policy` is manifest-level (per app).
+- Default is `auto` to preserve current behavior.
+- `manual` performs fetch/compare and reports `OutOfSync`, but does not call `docker compose up`.
+- `manual` currently suppresses any automatic apply path; future self-heal logic (item 1.4) must honor this gate.
+
+**Implementation status:**
+- Manifest parser accepts `sync_policy` and validates `auto|manual`.
+- Reconcile flow enforces policy: `manual` skips apply, `auto` applies when out of sync.
+- Sync status/metrics reflect manual drift as `OutOfSync` without incrementing compose sync counters.
+- Tests cover both policy branches (`manual` skip and `auto` apply).
 
 **Complexity:** Low — the check/sync split from item 2.3 makes this straightforward once that
 refactor is done.
@@ -155,18 +191,19 @@ from the compose file. If any required service is missing or stopped, trigger `c
 regardless of whether git changed. The git SHA check and the live state check become two
 independent triggers for the same sync action.
 
-**Open questions:**
-- What is the authoritative list of "expected services"? Options: (a) parse the compose file
-  and enumerate all services with `restart` policies other than `no`, (b) run
-  `docker compose config --services` and treat all services as expected, (c) use the last
-  successful `compose ps` output as the baseline. Option (b) is simplest and most correct.
-- How do we handle intentionally stopped services? If an operator runs `docker stop arr_sonarr`
-  for maintenance, steward will immediately restart it. Should there be a `steward suspend <app>`
-  mechanism, or is `enabled: false` + commit the correct GitOps answer?
-- Should self-heal be gated by `sync_policy`? (See open question in item 1.3.)
-- What is the restart-loop detection threshold? If a service restarts 3 times in 5 minutes,
-  should steward stop trying to heal it and report `Degraded` instead? This prevents a
-  storm of `compose up` calls against a broken container.
+**Open questions:** resolved.
+
+**Decisions (2026-05-23):**
+- Expected services are sourced from `docker compose config --services` (desired-state source of truth).
+- Intentionally stopped services are treated as drift; GitOps remains strict unless app is disabled in manifest.
+- Self-heal is gated by `sync_policy` and only applies when `sync_policy=auto`.
+- Restart-loop thresholding is deferred; first version has no additional threshold gate.
+
+**Implementation status:**
+- Reconcile now checks live drift even when git SHA is unchanged.
+- Drift between expected and live services triggers self-heal apply for `sync_policy=auto`.
+- For `sync_policy=manual`, live drift is recorded and reported without apply.
+- Self-heal outcomes are recorded in operation history with trigger `self_heal`.
 
 **Complexity:** Medium — requires parsing compose ps output and defining expected vs actual
 state comparison. Restart-loop detection adds meaningful complexity.
@@ -211,7 +248,7 @@ CREATE TABLE operations (
 Retain the last N rows per app (configurable, default 50). Expose history via a future
 `steward history <app>` CLI command or the `/status` HTTP endpoint alongside `/metrics`.
 
-**Open questions:**
+**Open questions:** resolved.
 - Should the operation log also record drift-detection events (i.e. a row when `OutOfSync` is
   detected but no sync is triggered because `sync_policy: manual`)? This would make the log a
   complete audit trail rather than only a sync log.
@@ -223,6 +260,16 @@ Retain the last N rows per app (configurable, default 50). Expose history via a 
 - The SQLite file lives in `STEWARD_DATA_DIR`. Should it be a separate file (`steward.db`) or
   merged with any existing state JSON? Recommendation: replace the JSON state file with SQLite
   entirely as part of this item.
+
+**Decisions (2026-05-23):**
+- Operation history includes manual-mode drift events (apply skipped) for complete auditability.
+- Retention is time-based and keeps the last 90 days of operation rows.
+- SQLite is the only state store (`steward.db`), with no JSON alternative.
+
+**Implementation status:**
+- Git-change sync attempts and self-heal events are appended to the `operations` table.
+- Manual drift events are recorded with `sync_status=Skipped` and descriptive messages.
+- Save path prunes operation rows older than 90 days for the current node.
 
 **Complexity:** Medium — SQLite is in the Python stdlib (`sqlite3`), so no new dependency.
 The schema is simple. The main work is migrating away from the existing JSON state file and
@@ -279,7 +326,7 @@ The full operation history stays in SQLite locally (item 1.5). The status file i
 "observed state snapshot" — the equivalent of what ArgoCD writes to the Application CRD's
 `.status` subresource.
 
-**Open questions:**
+**Open questions:** resolved.
 - Write access to the control repo requires a token with push rights. This is a broader
   permission than the current read-only token. Should the writeback use a separate deploy key
   scoped to only the `nodes/<hostname>/` path, or is a single read/write token acceptable?
@@ -296,8 +343,21 @@ The full operation history stays in SQLite locally (item 1.5). The status file i
 - What branch should the status file be committed to? `main` keeps everything in one place but
   mixes desired and observed state commits. A `status` branch is cleaner but adds complexity.
 
-**Complexity:** Medium — the git commit/push is a few lines with gitpython, but the token
-permission model and commit frequency decisions need to be settled first.
+**Decisions (2026-05-23):**
+- Use a single read/write token for control repo access (no separate path-scoped key in first version).
+- Write `nodes/<hostname>/status.json` only when file content changes.
+- Use direct git commit/push via gitpython to `CONTROL_REPO_BRANCH`.
+- If writeback fails, mark the reconcile run as `partial_failure` and continue processing app results.
+- Status writeback commits target `CONTROL_REPO_BRANCH` (default `main`).
+
+**Implementation status:**
+- Steward now renders observed app state to `nodes/<hostname>/status.json` after each run.
+- Writeback commits are skipped when the rendered content is unchanged.
+- Status writeback is committed and pushed with gitpython to `CONTROL_REPO_BRANCH`.
+- Writeback failure is surfaced as reconcile `partial_failure`.
+
+**Complexity:** Medium — mostly complete in implementation; future hardening can improve auth
+scope and branch protections.
 
 ---
 
@@ -321,15 +381,23 @@ overwrite on the next cycle. There is no signal that this happened.
   steward detect and report all drift (including out-of-band) without ever calling
   `docker compose up`. This is the audit / read-only mode that complements `sync_policy: manual`.
 
-**Open questions:**
-- Should `dry_run` be a global env var (node-wide) or a per-app manifest field? A node-wide
-  dry-run is useful for initial deployment validation; per-app dry-run overlaps heavily with
-  `sync_policy: manual`.
-- Is the `steward_app_ooband_heal_total` metric sufficient, or should out-of-band heals also
-  appear in the operation history (item 1.5) with a distinct `trigger: self_heal` field to
-  distinguish them from git-triggered syncs?
+**Open questions:** resolved.
 
-**Complexity:** Low (documentation + log message + metric) to Medium (dry-run mode).
+**Decisions (2026-05-23):**
+- `dry_run` is a global node-level env var: `STEWARD_DRY_RUN=true`.
+- Out-of-band heal visibility uses both operation history (`trigger=self_heal`) and
+  dedicated metric `steward_app_ooband_heal_total{app,node}`.
+- Out-of-band auto-heal logs a warning with explicit message text for operator visibility.
+
+**Implementation status:**
+- `STEWARD_DRY_RUN` now disables all compose apply actions while keeping drift detection,
+  status updates, notifications, and operation history.
+- Auto-heal writes warning logs for out-of-band drift healed by steward.
+- Metrics now expose `steward_app_ooband_heal_total{app,node}`.
+- Out-of-band heal operations are already recorded with `trigger=self_heal`.
+
+**Complexity:** Low to Medium — first usable contract is implemented; future work can add
+per-app dry-run if needed.
 
 ---
 
@@ -356,7 +424,7 @@ if status == OutOfSync and app.sync_policy == "auto":
     result = sync_app(app, repo, state)
 ```
 
-**Open questions:**
+**Open questions:** resolved.
 
 **Decisions (2026-05-23):**
 - `check_app` and `sync_app` return result objects; `reconcile_app` is the only place that
@@ -407,12 +475,18 @@ pull_policy: always                    # new in v2
 enabled: true
 ```
 
-**Open questions:**
-- Should v2 be introduced as part of this plan or deferred until there are enough new fields
-  to justify a schema bump? The `compose_env_file` rename alone is worth doing; adding
-  `sync_policy` and `pull_policy` at the same time means one bump covers all three.
-- Should the deprecation warning for v1 `env_file` include a migration hint pointing to the
-  docs?
+**Open questions:** resolved.
+
+**Decisions (2026-05-23):**
+- Manifest v2 is now active and bundled with `sync_policy` (item 1.3) and `pull_policy` (item 3.2).
+- Steward accepts both `version: 1` and `version: 2` manifests during migration.
+- `env_file` remains accepted as a compatibility shim but emits a deprecation warning that points users to `compose_env_file`.
+- `compose_env_file` and `env_file` are mutually exclusive in one manifest.
+
+**Implementation status:**
+- `steward.py` parser now supports schema v2 and validates `sync_policy`/`pull_policy` values.
+- `compose_env_file` is supported and mapped to compose `--env-file`; deprecated `env_file` still works with warning.
+- Tests cover v2 parsing, policy validation, defaults, and mutual exclusivity.
 
 **Complexity:** Low-medium — schema parsing change plus deprecation shim.
 
@@ -430,6 +504,11 @@ invocation (`up`, `ps`, `pull`, `down`). This makes the project name an explicit
 matching the manifest `name` field and decouples it from the directory structure.
 
 **Open questions:** None — this is unambiguously correct.
+
+**Implementation status:**
+- All compose invocations now pass `--project-name <app.name>`.
+- Project name is explicit for `up`, `ps`, and `config --services` paths.
+- Tests validate project-name flag usage for direct compose and self-update helper flows.
 
 **Complexity:** Trivial.
 
@@ -535,12 +614,16 @@ A future enhancement is a separate `digest` pull policy that runs `docker compos
 compares digests, and only restarts services whose image actually changed. This is the most
 correct behaviour but adds meaningful complexity and is deferred.
 
-**Open questions:**
-- Should the default change from `always` to `missing` for backwards compatibility? `always`
-  is safer (always gets latest) but more disruptive. `missing` is quieter but can miss tag
-  updates. Recommendation: keep `always` as the default to preserve current behaviour.
-- Should `pull_policy` be a manifest field (per app) or a node-level env var? Per-app is more
-  useful since different stacks have different update cadences.
+**Open questions:** resolved.
+
+**Decisions (2026-05-23):**
+- `pull_policy` is a per-app manifest field.
+- Default remains `always` for backward compatibility with existing behavior.
+
+**Implementation status:**
+- `run_compose` now passes `--pull <pull_policy>` from each app manifest.
+- Self-update helper compose invocation also uses the app-level `pull_policy`.
+- Tests validate that compose commands use configured pull policy values.
 
 **Complexity:** Low — adding the field to manifest parsing and passing it to the compose
 invocation is trivial. Intended to land as part of the v2 schema bump (item 2.4).
@@ -560,17 +643,17 @@ or `health_status=Degraded` event, POST a JSON payload to the URL. The payload f
 compatible with ntfy, Gotify, and generic Slack/Discord incoming webhooks via a configurable
 template.
 
-**Open questions:**
-- Should `notify_url` also be settable per-app in the manifest, or only as a node-wide env var?
-  Per-app allows routing different apps to different channels (e.g. critical apps to PagerDuty,
-  others to ntfy). Node-wide is simpler.
-- Should there be a notification for `OutOfSync` (drift detected, no sync triggered) in
-  `sync_policy: manual` mode? This is the "someone needs to approve a sync" notification and
-  maps directly to ArgoCD's notification for manual sync required.
-- Should notifications be de-duplicated? If an app is stuck `Degraded` for 30 minutes,
-  steward should not send 30 notifications. A simple "notify once per status transition" rule
-  (only notify when status *changes* to a bad state, not on every cycle) is the right default.
-  De-duplication requires tracking previous status — depends on SQLite state (item 3.1).
+**Open questions:** resolved.
+
+**Decisions (2026-05-23):**
+- Notification target supports both a node-wide default (`STEWARD_NOTIFY_URL`) and per-app manifest override (`notify_url`).
+- Manual-mode `OutOfSync` sends `drift_detected` notifications.
+- Notifications are intentionally not de-duplicated; bad states notify on every reconcile cycle.
+
+**Implementation status:**
+- Steward posts JSON webhook notifications for `sync_failed`, `health_degraded`, and `drift_detected` events.
+- Payload includes app, node, sync/health status, SHA context, and message.
+- Delivery uses per-app override first, then global default.
 
 **Complexity:** Low — a `requests.post` call with a JSON payload. The de-duplication logic
 (tracking previous status to detect transitions) requires the SQLite state store (item 3.1).
@@ -602,10 +685,18 @@ cannot track transitive dependency versions pinned in a lockfile.
 - In the Dockerfile, replace `pip install` with `uv pip install --system -r requirements.txt`.
 - In CI (GitHub Actions), replace pip invocations with `uv`.
 
-**Open questions:**
-- `requirements.in` + `uv pip compile` (simpler, fits the current project size) vs a full
-  `pyproject.toml` + `uv lock` (more idiomatic for a uv-first project but heavier). If items
-  4.2 and 4.3 land together this decision becomes: adopt `pyproject.toml` once for all three.
+**Open questions:** resolved.
+
+**Decisions (2026-05-23):**
+- Project uses uv-first dependency flow with committed `requirements.in`, `requirements.txt`, and `uv.lock`.
+- Docker build installs runtime deps via `uv pip install --system -r requirements.txt`.
+- CI jobs use uv for environment setup and command execution.
+
+**Implementation status:**
+- Runtime deps are pinned in `requirements.txt` and managed from `requirements.in`.
+- Dockerfile uses uv-based install path instead of direct pip dependency installs.
+- CI workflow uses uv in both lint and test jobs.
+- Dependabot includes weekly `pip` updates for root requirements files.
 
 **Dependabot config:** add a `pip` entry to `.github/dependabot.yml` pointing at `requirements.txt`.
 
@@ -637,6 +728,10 @@ iteration slow and regressions likely. This becomes a blocker once Goal 1 refact
 **CI:** add a `test` job to `build.yml` that runs before `build-and-push` and blocks it on
 failure.
 
+**Implementation status:**
+- Test suite is in place with focused coverage for parser, reconcile logic, compose integration behavior, and SQLite state.
+- CI `test` job runs `uv run pytest -v --tb=short` and blocks image builds on failures.
+
 **Complexity:** Medium — the git and subprocess interactions need careful mocking, but the
 functions are well-isolated and testable.
 
@@ -656,7 +751,89 @@ Dockerfile. Issues are only caught at runtime on a live node.
 
 **CI:** add a `lint` job to `build.yml` (parallel to `test`, both blocking `build-and-push`).
 
+**Implementation status:**
+- Ruff config is defined in `pyproject.toml` and enforced in CI.
+- CI `lint` job runs `uv run ruff check steward.py metrics_server.py tests`.
+- Hadolint is enabled in CI and checks the Dockerfile on each run.
+
 **Complexity:** Low — mostly adding config files and CI steps.
+
+---
+
+## Goal 5 — Installer UX without curl pipe shell
+
+These items define a secure installation path where steward ships an installer CLI inside the
+container image. The operator runs a `docker run` command with explicit mounts and arguments,
+instead of fetching and executing remote shell scripts.
+
+### 5.1 Installation workflow design (planning)
+
+**Problem:** Current bootstrap is functional but not beginner-friendly, and secure installation
+guidance should avoid `curl | bash` patterns entirely.
+
+**Proposed solution:** Add a mode-based installer command that runs in-container and supports
+progressive depth:
+
+- `verify` mode: preflight checks only (paths, permissions, docker socket, git auth, control repo reachability).
+- `bootstrap` mode: preflight plus idempotent generation of local runtime templates.
+- `zero_to_hero` mode: bootstrap plus node skeleton creation for first-time adoption.
+
+**Planned install steps:**
+1. Validate required mounts and write access for steward data paths.
+2. Validate docker socket accessibility for compose operations.
+3. Validate git authentication and control repo access.
+4. Initialize local state store and run manifest parse validation.
+5. Optionally generate missing runtime files (template-based, overwrite only with explicit flag).
+6. Optionally create starter node paths/files for first-time users.
+7. Print a deterministic summary and next command(s).
+
+**Open questions:** resolved.
+
+**Decisions (2026-05-24):**
+- Installer supports multiple depth modes so existing and new users share one entrypoint.
+- Installer can optionally hand off to runtime when explicitly requested.
+- Interactive auth setup is supported, with strict redaction and explicit write confirmation.
+
+**Implementation status:**
+- Planning complete only; no implementation yet.
+
+**Complexity:** Medium.
+
+---
+
+### 5.2 Installer CLI design (planning)
+
+**Problem:** Steward currently exposes reconcile behavior but no first-class installer command.
+
+**Proposed solution:** Add a container command router with an `install` subcommand that orchestrates
+the workflow above and can run in interactive or non-interactive mode.
+
+**Planned CLI surface:**
+- `install --mode verify|bootstrap|zero_to_hero`
+- `install --interactive-auth`
+- `install --write-templates`
+- `install --overwrite`
+- `install --start` (optional runtime handoff after install)
+
+**Planned CLI behavior:**
+1. Route command at process entry (install vs reconcile).
+2. Run preflight checks and fail with actionable, non-secret diagnostics.
+3. Execute mode-specific actions idempotently.
+4. Suppress secret echoing in logs and output.
+5. Support non-TTY automation via explicit flags.
+6. Exit with clear status codes suitable for CI and ops scripts.
+
+**Open questions:** resolved.
+
+**Decisions (2026-05-24):**
+- `--start` is opt-in to avoid accidental long-running behavior in automation.
+- Interactive prompts are disabled when no TTY is present.
+- Credential-bearing file writes require explicit user confirmation/flag.
+
+**Implementation status:**
+- Planning complete only; no implementation yet.
+
+**Complexity:** Medium.
 
 ---
 

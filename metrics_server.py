@@ -15,6 +15,8 @@ from state_store import load_state as load_sqlite_state
 
 DB_FILE = Path(os.environ.get("GITOPS_ROOT", "/git")) / "steward.db"
 NODE_NAME = os.environ.get("GITOPS_NODE_NAME", socket.gethostname())
+SYNC_STATUS_VALUES = ("Synced", "OutOfSync", "Unknown", "Disabled")
+HEALTH_STATUS_VALUES = ("Healthy", "Degraded", "Progressing", "Unknown")
 
 
 def _resolve_port(argv: list[str]) -> int:
@@ -99,6 +101,36 @@ def format_metrics(state: dict) -> str:
         for result, count in app.get("sync_total", {}).items():
             write("Total docker compose runs per app by result", "counter",
                   "steward_app_sync_total", count, **base, result=result)
+
+        write(
+            "Total out-of-band drifts healed per app",
+            "counter",
+            "steward_app_ooband_heal_total",
+            app.get("ooband_heal_total", 0),
+            **base,
+        )
+
+        current_sync_status = app.get("sync_status", "Unknown")
+        for status in SYNC_STATUS_VALUES:
+            write(
+                "Current sync status for app as one-hot gauge labels",
+                "gauge",
+                "steward_app_sync_status",
+                1 if status == current_sync_status else 0,
+                **base,
+                status=status,
+            )
+
+        current_health_status = app.get("health_status", "Unknown")
+        for status in HEALTH_STATUS_VALUES:
+            write(
+                "Current health status for app as one-hot gauge labels",
+                "gauge",
+                "steward_app_health_status",
+                1 if status == current_health_status else 0,
+                **base,
+                status=status,
+            )
 
     lines.append("")
     return "\n".join(lines)

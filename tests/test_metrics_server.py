@@ -45,6 +45,21 @@ def _prepare_db(path: Path, node: str) -> None:
           last_synced TEXT,
           PRIMARY KEY (app, node)
         );
+
+        CREATE TABLE operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          app TEXT NOT NULL,
+          node TEXT NOT NULL,
+          started_at TEXT NOT NULL,
+          completed_at TEXT,
+          trigger TEXT,
+          from_sha TEXT,
+          to_sha TEXT,
+          sync_status TEXT,
+          health_status TEXT,
+          duration_s REAL,
+          message TEXT
+        );
         """
     )
 
@@ -66,8 +81,8 @@ def _prepare_db(path: Path, node: str) -> None:
           app, node, repo, ref, ref_type, enabled,
           last_reconcile_timestamp, last_sync_timestamp,
           reconcile_success, reconcile_failed, reconcile_skipped,
-          sync_success, sync_failed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sync_success, sync_failed, sync_status, health_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "demo",
@@ -83,6 +98,8 @@ def _prepare_db(path: Path, node: str) -> None:
             1,
             4,
             1,
+            "OutOfSync",
+            "Degraded",
         ),
     )
 
@@ -107,6 +124,49 @@ def test_load_state_from_db_and_format_metrics(tmp_path: Path, monkeypatch: pyte
     body = metrics_server.format_metrics(state)
     assert "steward_reconcile_total" in body
     assert 'app="demo"' in body
+    assert 'steward_app_sync_status{node="node-a",app="demo",status="OutOfSync"} 1' in body
+    assert 'steward_app_sync_status{node="node-a",app="demo",status="Synced"} 0' in body
+    assert 'steward_app_health_status{node="node-a",app="demo",status="Degraded"} 1' in body
+    assert 'steward_app_health_status{node="node-a",app="demo",status="Healthy"} 0' in body
+    assert 'steward_app_ooband_heal_total{node="node-a",app="demo"} 0' in body
+
+
+def test_oob_heal_metric_uses_operations_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_path = tmp_path / "steward.db"
+    node = "node-a"
+    _prepare_db(db_path, node)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        INSERT INTO operations (
+          app, node, started_at, completed_at, trigger, from_sha, to_sha,
+          sync_status, health_status, duration_s, message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "demo",
+            node,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+            "self_heal",
+            "abc",
+            "abc",
+            "Synced",
+            "Healthy",
+            1.0,
+            "live_drift_detected[db:missing]",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(metrics_server, "DB_FILE", db_path)
+    monkeypatch.setattr(metrics_server, "NODE_NAME", node)
+
+    body = metrics_server.format_metrics(metrics_server._load_state_from_db())
+
+    assert 'steward_app_ooband_heal_total{node="node-a",app="demo"} 1' in body
 
 
 def test_load_state_from_db_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

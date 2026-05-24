@@ -47,7 +47,7 @@ scrape_configs:
               "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)",
               "name": "Annotations & Alerts", "type": "dashboard"}]
   },
-  "description": "Steward GitOps agent — reconciliation and sync status",
+  "description": "Steward GitOps agent — reconciliation, sync, health, and drift status",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -159,8 +159,8 @@ scrape_configs:
     },
     {
       "id": 3,
-      "title": "Compose Failures (1 h)",
-      "description": "Total failed docker compose runs across all apps in the last hour.",
+      "title": "Apply Failures (1 h)",
+      "description": "Total failed docker compose apply runs across all apps in the last hour.",
       "type": "stat",
       "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
@@ -235,7 +235,7 @@ scrape_configs:
     {
       "id": 5,
       "title": "App Status",
-      "description": "Per-app reconcile and sync health. Colour cells turn red on failure.",
+      "description": "Per-app status snapshot: reconcile staleness, OutOfSync, Degraded, failures, and self-heal activity.",
       "type": "table",
       "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
@@ -247,13 +247,28 @@ scrape_configs:
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "increase(steward_app_reconcile_total{node=~\"$node\", result=\"failed\"}[1h])",
+          "expr": "max by (node, app) (steward_app_sync_status{node=~\"$node\", status=\"OutOfSync\"})",
           "instant": true, "format": "table", "legendFormat": "", "refId": "B"
         },
         {
           "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
-          "expr": "increase(steward_app_sync_total{node=~\"$node\", result=\"failed\"}[1h])",
+          "expr": "max by (node, app) (steward_app_health_status{node=~\"$node\", status=\"Degraded\"})",
           "instant": true, "format": "table", "legendFormat": "", "refId": "C"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "increase(steward_app_reconcile_total{node=~\"$node\", result=\"failed\"}[1h])",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "D"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "increase(steward_app_sync_total{node=~\"$node\", result=\"failed\"}[1h])",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "E"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "increase(steward_app_ooband_heal_total{node=~\"$node\"}[1h])",
+          "instant": true, "format": "table", "legendFormat": "", "refId": "F"
         }
       ],
       "transformations": [
@@ -263,14 +278,17 @@ scrape_configs:
           "options": {
             "excludeByName": {
               "Time": true, "__name__": true, "job": true, "instance": true,
-              "result": true, "ref": true, "ref_type": true, "repo": true, "enabled": true
+              "result": true, "status": true, "ref": true, "ref_type": true, "repo": true, "enabled": true
             },
             "renameByName": {
               "node": "Node",
               "app": "App",
               "Value #A": "Last Reconcile (s ago)",
-              "Value #B": "Reconcile Failures (1h)",
-              "Value #C": "Sync Failures (1h)"
+              "Value #B": "OutOfSync",
+              "Value #C": "Degraded",
+              "Value #D": "Reconcile Failures (1h)",
+              "Value #E": "Apply Failures (1h)",
+              "Value #F": "OOB Heals (1h)"
             }
           }
         }
@@ -291,6 +309,26 @@ scrape_configs:
             ]
           },
           {
+            "matcher": {"id": "byName", "options": "OutOfSync"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background"},
+              {"id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
+              }}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "Degraded"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background"},
+              {"id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
+              }}
+            ]
+          },
+          {
             "matcher": {"id": "byName", "options": "Reconcile Failures (1h)"},
             "properties": [
               {"id": "custom.displayMode", "value": "color-background"},
@@ -301,12 +339,22 @@ scrape_configs:
             ]
           },
           {
-            "matcher": {"id": "byName", "options": "Sync Failures (1h)"},
+            "matcher": {"id": "byName", "options": "Apply Failures (1h)"},
             "properties": [
               {"id": "custom.displayMode", "value": "color-background"},
               {"id": "thresholds", "value": {
                 "mode": "absolute",
                 "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]
+              }}
+            ]
+          },
+          {
+            "matcher": {"id": "byName", "options": "OOB Heals (1h)"},
+            "properties": [
+              {"id": "custom.displayMode", "value": "color-background"},
+              {"id": "thresholds", "value": {
+                "mode": "absolute",
+                "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]
               }}
             ]
           }
@@ -537,21 +585,87 @@ groups:
         execErrState: Error
         isPaused: false
 
-      - uid: steward-self-update-failed
-        title: "Steward — Self-update failed"
+      - uid: steward-health-degraded
+        title: "Steward — App health degraded"
+        condition: threshold
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Health degraded for {{ $labels.app }} on {{ $labels.node }}"
+          description: "steward_app_health_status is Degraded for app {{ $labels.app }} for at least 5 minutes."
+        data:
+          - refId: query
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: REPLACE_WITH_YOUR_PROMETHEUS_UID
+            model:
+              expr: 'steward_app_health_status{status="Degraded"}'
+              instant: true
+              refId: query
+          - refId: threshold
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              expression: query
+              refId: threshold
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+                  operator: {type: and}
+                  reducer: {type: last, params: []}
+                  query: {params: [query]}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        isPaused: false
+
+      - uid: steward-app-outofsync
+        title: "Steward — App remains out of sync"
+        condition: threshold
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.app }} on {{ $labels.node }} is OutOfSync"
+          description: "steward_app_sync_status has remained OutOfSync for at least 10 minutes."
+        data:
+          - refId: query
+            relativeTimeRange: {from: 600, to: 0}
+            datasourceUid: REPLACE_WITH_YOUR_PROMETHEUS_UID
+            model:
+              expr: 'steward_app_sync_status{status="OutOfSync"}'
+              instant: true
+              refId: query
+          - refId: threshold
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              expression: query
+              refId: threshold
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+                  operator: {type: and}
+                  reducer: {type: last, params: []}
+                  query: {params: [query]}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        isPaused: false
+
+      - uid: steward-control-repo-sync-failed
+        title: "Steward — Control repo sync failed"
         condition: threshold
         for: 0s
         labels:
           severity: warning
         annotations:
-          summary: "Steward self-update failed on {{ $labels.node }}"
-          description: "docker pull or restart failed during the hourly self-update check on node {{ $labels.node }}."
+          summary: "Control repo sync failed on {{ $labels.node }}"
+          description: "steward_control_repo_sync_total{result=\"failed\"} increased in the last 15 minutes."
         data:
           - refId: query
-            relativeTimeRange: {from: 3600, to: 0}
+            relativeTimeRange: {from: 900, to: 0}
             datasourceUid: REPLACE_WITH_YOUR_PROMETHEUS_UID
             model:
-              expr: 'increase(steward_self_update_total{result="failed"}[1h])'
+              expr: 'increase(steward_control_repo_sync_total{result="failed"}[15m])'
               instant: true
               refId: query
           - refId: threshold
@@ -581,4 +695,6 @@ Go to **Alerting → Alert rules → New alert rule** and use these PromQL expre
 | Repeated reconcile failures | `increase(steward_app_reconcile_total{result="failed"}[15m])` | `> 2` | warning |
 | Node not reporting | `time() - steward_reconcile_last_timestamp_seconds` | `> 300` | critical — set **No data** → Alerting |
 | App not reconciled | `time() - steward_app_last_reconcile_timestamp_seconds` | `> 300` | warning |
-| Self-update failed | `increase(steward_self_update_total{result="failed"}[1h])` | `> 0` | warning |
+| App health degraded | `steward_app_health_status{status="Degraded"}` | `> 0` | warning |
+| App remains out of sync | `steward_app_sync_status{status="OutOfSync"}` | `> 0` for 10m | warning |
+| Control repo sync failed | `increase(steward_control_repo_sync_total{result="failed"}[15m])` | `> 0` | warning |

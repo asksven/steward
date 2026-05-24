@@ -14,48 +14,56 @@
 ---
 # templates/arr.yml
 # Copy this to nodes/<hostname>/arr.yml and customize
-version: 1
+version: 2
 name: arr
 repo: https://github.com/you/arr-stack
 ref:
   branch: main
 path: .
 compose_file: docker-compose.yml
-env_file: ~
+compose_env_file: ~
+sync_policy: auto
+pull_policy: always
 enabled: true
 
 ---
 # templates/prometheus-node-exporter.yml
-version: 1
+version: 2
 name: prometheus-node-exporter
 repo: https://github.com/you/prometheus-stack
 ref:
   branch: main
 path: .
 compose_file: docker-compose.yml
-env_file: ~
+compose_env_file: ~
+sync_policy: auto
+pull_policy: always
 enabled: true
 
 ---
 # nodes/node1.lan/arr.yml
-version: 1
+version: 2
 name: arr
 repo: https://github.com/you/arr-stack
 ref:
   branch: main
 path: .
 compose_file: docker-compose.yml
-env_file: /opt/gitops/arr.env
+compose_env_file: /opt/gitops/arr.env
+sync_policy: auto
+pull_policy: always
 enabled: true
 
 ---
 # nodes/node1.lan/prometheus-node-exporter.yml
-version: 1
+version: 2
 name: prometheus-node-exporter
 repo: https://github.com/you/prometheus-stack
 ref:
   tag: v1.8.0          # pinned to a release tag on this node
 path: .
 compose_file: docker-compose.yml
-env_file: ~
+compose_env_file: ~
+sync_policy: auto
+pull_policy: missing
 enabled: true

@@ -4,7 +4,7 @@ A lightweight, per-node GitOps reconciler for Docker Compose stacks, inspired by
 
 ## Concept
 
-One container runs on each node. It watches a central **control repo** for app manifests, and per-app **stack repos** for compose file changes. When drift is detected it runs `docker compose up -d --remove-orphans`. Steward can reconcile its own stack as part of normal GitOps flow.
+One container runs on each node. It watches a central **control repo** for app manifests, and per-app **stack repos** for compose file changes. When drift is detected it runs `docker compose up -d --remove-orphans` with the app's configured pull policy. Steward can reconcile its own stack as part of normal GitOps flow.
 
 ```
 GitHub: homelab-gitops/          ← app manifests (what runs where)
@@ -135,6 +135,8 @@ All configuration is via environment variables.
 | `AGENT_IMAGE` | no | — | Overrides the image tag in `docker-compose.yml`; useful for testing a local build |
 | `LOGLEVEL` | no | `INFO` | Log level (`DEBUG` enables per-path inside/outside diagnostics) |
 | `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
+| `STEWARD_NOTIFY_URL` | no | — (disabled) | Default webhook endpoint for failure/degraded/drift notifications |
+| `STEWARD_DRY_RUN` | no | `false` | Node-wide read-only mode: detect/report drift, but never run `docker compose up` |
 
 ---
 
@@ -143,7 +145,7 @@ All configuration is via environment variables.
 Each `.yml` file in `nodes/<hostname>/` in the control repo describes one application.
 
 ```yaml
-version: 1                              # required, must be 1
+version: 2                              # required, supported: 1, 2
 name: arr                               # required, used as local repo directory name
 repo: https://github.com/you/arr-stack  # required, HTTPS or SSH URL
 ref:
@@ -151,15 +153,29 @@ ref:
   # tag: v1.2.3                         # pin to a specific release
 path: .                                 # path within repo to compose file, default: .
 compose_file: docker-compose.yml        # compose filename, default: docker-compose.yml
-env_file: /git/envs/arr.env             # path inside the container; /git maps to STEWARD_DATA_DIR on the host
+compose_env_file: /git/envs/arr.env     # preferred in v2; replaces deprecated env_file
+sync_policy: auto                       # optional: auto (default) or manual
+pull_policy: always                     # optional: always (default), missing, never
+health_check_delay_seconds: 30          # optional: delay before compose health check
+notify_url: https://notify.example/hook # optional: per-app webhook override
 enabled: true                           # required, explicit — use false to disable without deleting
 ```
+
+Compatibility notes:
+
+- v1 manifests are still accepted.
+- `env_file` still works but is deprecated; steward logs a warning and you should migrate to `compose_env_file`.
+- `compose_env_file` and `env_file` cannot be set together.
 
 ### Validation rules
 
 - `version`, `name`, `repo`, `ref`, and `enabled` are all required — missing any is a hard error
 - `ref.branch` and `ref.tag` are mutually exclusive — specifying both is a hard error
 - `enabled` has no default — must be explicitly set
+- `sync_policy` supports `auto` and `manual` (default: `auto`)
+- `pull_policy` supports `always`, `missing`, and `never` (default: `always`)
+- `health_check_delay_seconds` must be an integer between `0` and `600` (default: `30`)
+- `notify_url` overrides `STEWARD_NOTIFY_URL` for that app only
 
 ---
 
@@ -338,6 +354,9 @@ scrape_configs:
 | `steward_app_last_sync_timestamp_seconds{app}` | gauge | Unix timestamp of last `docker compose up` per app |
 | `steward_app_reconcile_total{app,result}` | counter | Reconcile attempts per app by result (`success`, `failed`, `skipped`) |
 | `steward_app_sync_total{app,result}` | counter | Compose runs per app by result (`success`, `failed`) |
+| `steward_app_sync_status{app,status}` | gauge | Current sync status as one-hot values across `Synced`, `OutOfSync`, `Unknown`, `Disabled` |
+| `steward_app_health_status{app,status}` | gauge | Current health status as one-hot values across `Healthy`, `Degraded`, `Progressing`, `Unknown` |
+| `steward_app_ooband_heal_total{app}` | counter | Out-of-band drift heals performed by steward (`sync_policy=auto` and not dry-run) |
 
 All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 
@@ -360,12 +379,36 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 
 2. for each app manifest (including steward itself, if present):
    ├── enabled: false → skip
+  │                  └── sync status: Disabled
    ├── stack repo not cloned → clone
    ├── git fetch stack repo
-  │   ├── up to date → skip
-  │   └── changed → git pull/checkout → docker compose --project-name <app.name> up -d --remove-orphans --pull always
+  │   ├── compare failed → sync status: Unknown
+  │   ├── up to date
+  │   │   ├── no live drift → sync status: Synced
+  │   │   └── live drift (missing/stopped expected service)
+  │   │       ├── sync_policy: manual → skip apply, notify drift_detected
+  │   │       └── sync_policy: auto
+  │   │           ├── STEWARD_DRY_RUN=true → skip apply, notify drift_detected
+  │   │           └── STEWARD_DRY_RUN=false → self-heal via compose up
+  │   └── changed
+  │       ├── sync_policy: manual → skip apply (sync status: OutOfSync), notify drift_detected
+  │       └── sync_policy: auto
+  │           ├── STEWARD_DRY_RUN=true → skip apply, notify drift_detected
+  │           └── STEWARD_DRY_RUN=false → git pull/checkout → docker compose --project-name <app.name> up -d --remove-orphans --pull <pull_policy>
+  ├── write observed state snapshot to nodes/<hostname>/status.json in control repo
+  │   └── commit/push only when content changed
    └── log result
 ```
+
+### Notifications
+
+When a notification URL is configured (`notify_url` per app, or global `STEWARD_NOTIFY_URL`), steward posts JSON events for:
+
+- `sync_failed`
+- `health_degraded`
+- `drift_detected` (including manual mode OutOfSync)
+
+Notifications are intentionally **not de-duplicated**. If a bad state persists, a notification is sent on each reconcile cycle.
 
 ---
 
@@ -502,7 +545,6 @@ The rolling major tag (`:0`) is the recommended choice. It moves with every rele
 
 Some natural next steps not yet implemented:
 
-- **Failure notifications** — POST to a webhook (Gotify, ntfy, Slack) on reconciliation failure
 - **Dry-run mode** — `python3 steward.py --dry-run` to show what would change without applying
 - **Status command** — print current deployed SHA vs remote SHA for each app
 - **Schema version 2** — reserved for future manifest extensions

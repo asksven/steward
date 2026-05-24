@@ -4,6 +4,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+OPERATION_RETENTION_DAYS = 90
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS reconcile_state (
   node TEXT PRIMARY KEY,
@@ -117,6 +119,19 @@ def load_state(db_file: Path, node_name: str, require_data: bool = False) -> dic
         "SELECT * FROM app_state WHERE node = ? ORDER BY app",
         (node_name,),
     ).fetchall()
+    oob_heal_rows = conn.execute(
+        """
+        SELECT app, COUNT(*) AS count
+        FROM operations
+        WHERE node = ?
+          AND trigger = 'self_heal'
+          AND sync_status = 'Synced'
+        GROUP BY app
+        """,
+        (node_name,),
+    ).fetchall()
+    oob_heal_counts = {row["app"]: int(row["count"]) for row in oob_heal_rows}
+
     for row in app_rows:
         app_state = {
             "repo": row["repo"] or "",
@@ -132,7 +147,16 @@ def load_state(db_file: Path, node_name: str, require_data: bool = False) -> dic
                 "success": row["sync_success"],
                 "failed": row["sync_failed"],
             },
+            "ooband_heal_total": oob_heal_counts.get(row["app"], 0),
         }
+        if row["sync_status"]:
+            app_state["sync_status"] = row["sync_status"]
+        if row["health_status"]:
+            app_state["health_status"] = row["health_status"]
+        if row["deployed_sha"]:
+            app_state["deployed_sha"] = row["deployed_sha"]
+        if row["remote_sha"]:
+            app_state["remote_sha"] = row["remote_sha"]
         if row["last_reconcile_timestamp"] is not None:
             app_state["last_reconcile_timestamp"] = row["last_reconcile_timestamp"]
         if row["last_sync_timestamp"] is not None:
@@ -200,8 +224,9 @@ def save_state(db_file: Path, node_name: str, state: dict) -> None:
               app, node, repo, ref, ref_type, enabled,
               last_reconcile_timestamp, last_sync_timestamp,
               reconcile_success, reconcile_failed, reconcile_skipped,
-              sync_success, sync_failed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            sync_success, sync_failed,
+                            sync_status, health_status, deployed_sha, remote_sha
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(app, node) DO UPDATE SET
               repo = excluded.repo,
               ref = excluded.ref,
@@ -213,7 +238,11 @@ def save_state(db_file: Path, node_name: str, state: dict) -> None:
               reconcile_failed = excluded.reconcile_failed,
               reconcile_skipped = excluded.reconcile_skipped,
               sync_success = excluded.sync_success,
-              sync_failed = excluded.sync_failed
+              sync_failed = excluded.sync_failed,
+              sync_status = excluded.sync_status,
+              health_status = excluded.health_status,
+              deployed_sha = excluded.deployed_sha,
+              remote_sha = excluded.remote_sha
             """,
             (
                 app_name,
@@ -229,6 +258,10 @@ def save_state(db_file: Path, node_name: str, state: dict) -> None:
                 app_rec.get("skipped", 0),
                 app_sync.get("success", 0),
                 app_sync.get("failed", 0),
+                app.get("sync_status"),
+                app.get("health_status"),
+                app.get("deployed_sha"),
+                app.get("remote_sha"),
             ),
         )
 
@@ -251,7 +284,7 @@ def save_state(db_file: Path, node_name: str, state: dict) -> None:
                 app.get("repo", ""),
                 app.get("ref_type", ""),
                 app.get("ref", ""),
-                "auto",
+                app.get("sync_policy", "auto"),
                 1 if app.get("enabled", True) else 0,
                 now_iso,
             ),
@@ -279,6 +312,19 @@ def save_state(db_file: Path, node_name: str, state: dict) -> None:
                 op.get("message"),
             ),
         )
+
+    cutoff_iso = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(time.time() - (OPERATION_RETENTION_DAYS * 24 * 60 * 60)),
+    )
+    conn.execute(
+        """
+        DELETE FROM operations
+        WHERE node = ?
+          AND COALESCE(completed_at, started_at) < ?
+        """,
+        (node, cutoff_iso),
+    )
 
     conn.commit()
     conn.close()

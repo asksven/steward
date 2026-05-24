@@ -1,11 +1,11 @@
 
-Phase	Items	Key prerequisite / open question to resolve first
-x0	4.1, 4.3	none
-x1	4.2	none — write tests for current code
-x2	2.5	none
-3	2.3, 3.1	Decide: result objects vs direct DB writes in 2.3
-4	2.4, 3.2	none — bundle as one PR
-5	1.1 → 1.3 → 1.2	Decide: Progressing window + healthcheck-less handling before 1.2
-6	1.4, 1.5, 3.3	Decide: does manual sync_policy suppress self-heal (before 1.4)
-7	2.1, 2.2	Decide: writeback frequency + branch before 2.1
-The natural first PR after Phase 0/1 is always Phase 3, since it's the highest-leverage unlock. Everything from Phase 5 onwards flows cleanly once 2.3 and 3.1 are merged.
+Phase	Items	Status	Notes
+0	4.1, 4.3	complete	uv dependency flow, ruff, and hadolint are active in CI.
+1	4.2	complete	Pytest suite is in place and enforced before build-and-push.
+2	2.5	complete	Compose project name is explicit via --project-name <app.name>.
+3	2.3, 3.1	complete	check/sync phase split and SQLite single-state-store migration are complete.
+4	2.4, 3.2	complete	Manifest v2 plus pull_policy landed together as planned.
+5	1.1 -> 1.3 -> 1.2	complete	Sync status, sync policy, and health status lifecycle are implemented.
+6	1.4, 1.5, 3.3	complete	Live drift self-heal, operation history, and notifications are implemented.
+7	2.1, 2.2	complete	Status writeback, partial-failure behavior, and dry-run/oob contract are implemented.
+8	Plan consistency pass	complete	Open-question sections and implementation status tracking normalized in plan.md.
