@@ -37,6 +37,10 @@ if [ -f /run/secrets/ssh_key ]; then
   if [ -f /run/secrets/ssh_known_hosts ]; then
     cp /run/secrets/ssh_known_hosts "${STEWARD_HOME}/.ssh/known_hosts"
     chmod 644 "${STEWARD_HOME}/.ssh/known_hosts"
+    SSH_HOST_KEY_CHECK="yes"
+  else
+    echo "WARNING: No known_hosts secret provided; using accept-new for host key checking"
+    SSH_HOST_KEY_CHECK="accept-new"
   fi
 
   # Write a minimal SSH config that uses the key for all hosts
@@ -44,7 +48,7 @@ if [ -f /run/secrets/ssh_key ]; then
 Host *
   IdentityFile ${STEWARD_HOME}/.ssh/id_ed25519
   IdentitiesOnly yes
-  StrictHostKeyChecking yes
+  StrictHostKeyChecking ${SSH_HOST_KEY_CHECK}
 SSHCONF
   chmod 600 "${STEWARD_HOME}/.ssh/config"
   chmod 700 "${STEWARD_HOME}/.ssh"
