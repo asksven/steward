@@ -28,14 +28,39 @@ echo "  Running as:   ${STEWARD_UID}:${STEWARD_GID}"
 echo "  Home:         ${STEWARD_HOME}"
 echo "  Metrics port: ${METRICS_PORT:-(disabled)}"
 
-# Copy SSH credentials from staging mount to the target home dir with correct ownership.
-# (bind-mounted files retain host UID; SSH rejects keys/config not owned by the running user)
-if [ -d /root/.ssh-host ] && ls /root/.ssh-host/* >/dev/null 2>&1; then
+# Set up SSH from Docker secrets (/run/secrets/ssh_key, /run/secrets/ssh_known_hosts)
+if [ -f /run/secrets/ssh_key ]; then
+  mkdir -p "${STEWARD_HOME}/.ssh"
+  cp /run/secrets/ssh_key "${STEWARD_HOME}/.ssh/id_ed25519"
+  chmod 600 "${STEWARD_HOME}/.ssh/id_ed25519"
+
+  if [ -f /run/secrets/ssh_known_hosts ]; then
+    cp /run/secrets/ssh_known_hosts "${STEWARD_HOME}/.ssh/known_hosts"
+    chmod 644 "${STEWARD_HOME}/.ssh/known_hosts"
+  fi
+
+  # Write a minimal SSH config that uses the key for all hosts
+  cat > "${STEWARD_HOME}/.ssh/config" <<SSHCONF
+Host *
+  IdentityFile ${STEWARD_HOME}/.ssh/id_ed25519
+  IdentitiesOnly yes
+  StrictHostKeyChecking yes
+SSHCONF
+  chmod 600 "${STEWARD_HOME}/.ssh/config"
+  chmod 700 "${STEWARD_HOME}/.ssh"
+  chown -R "${STEWARD_UID}:${STEWARD_GID}" "${STEWARD_HOME}/.ssh"
+  echo "SSH key configured from Docker secret"
+elif [ -d /root/.ssh-host ] && ls /root/.ssh-host/* >/dev/null 2>&1; then
+  # Legacy fallback: copy from bind-mounted staging directory
   mkdir -p "${STEWARD_HOME}/.ssh"
   cp /root/.ssh-host/* "${STEWARD_HOME}/.ssh/"
   chmod 700 "${STEWARD_HOME}/.ssh"
   chmod 600 "${STEWARD_HOME}/.ssh/"*
   chown -R "${STEWARD_UID}:${STEWARD_GID}" "${STEWARD_HOME}"
+  echo "SSH key configured from legacy .ssh-host mount (consider migrating to Docker secrets)"
+else
+  echo "WARNING: No SSH key found. Git operations on private repos will fail."
+  echo "  Configure SSH_KEY_FILE in .env or provide /run/secrets/ssh_key"
 fi
 
 # Ensure git root directories exist and are owned by the target user

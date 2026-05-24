@@ -20,7 +20,7 @@ def _sample_manifest(**overrides) -> dict:
     data = {
         "version": 1,
         "name": "demo",
-        "repo": "https://example.com/repo.git",
+        "repo": "git@example.com:org/repo.git",
         "ref": {"branch": "main"},
         "enabled": True,
     }
@@ -132,6 +132,37 @@ def test_parse_manifest_rejects_invalid_sync_policy(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsupported sync_policy"):
         steward.parse_manifest(manifest_file)
+
+
+def test_parse_manifest_rejects_https_repo_url(tmp_path: Path) -> None:
+    manifest = _sample_manifest(repo="https://github.com/you/repo.git")
+    manifest_file = _write_manifest(tmp_path, _to_yaml(manifest))
+
+    with pytest.raises(ValueError, match="only SSH URLs are supported"):
+        steward.parse_manifest(manifest_file)
+
+
+def test_is_ssh_url_accepts_valid_urls() -> None:
+    assert steward.is_ssh_url("git@github.com:org/repo.git") is True
+    assert steward.is_ssh_url("ssh://git@github.com/org/repo.git") is True
+    assert steward.is_ssh_url("git@gitlab.com:org/repo.git") is True
+
+
+def test_is_ssh_url_rejects_https() -> None:
+    assert steward.is_ssh_url("https://github.com/org/repo.git") is False
+    assert steward.is_ssh_url("https://oauth2:token@github.com/org/repo") is False
+    assert steward.is_ssh_url("http://github.com/org/repo.git") is False
+
+
+def test_validate_repo_url_returns_none_for_ssh() -> None:
+    assert steward.validate_repo_url("git@github.com:org/repo.git") is None
+    assert steward.validate_repo_url("ssh://git@github.com/org/repo.git") is None
+
+
+def test_validate_repo_url_returns_error_for_https() -> None:
+    err = steward.validate_repo_url("https://github.com/org/repo.git")
+    assert err is not None
+    assert "only SSH URLs are supported" in err
 
 
 def test_parse_manifest_defaults_health_delay(tmp_path: Path) -> None:
@@ -252,7 +283,7 @@ def test_spawn_compose_helper_falls_back_when_helper_image_missing(
     app = steward.AppManifest(
         version=1,
         name="steward",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -283,7 +314,7 @@ def test_spawn_compose_helper_falls_back_when_host_path_lookup_fails(
     app = steward.AppManifest(
         version=1,
         name="steward",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -323,7 +354,7 @@ def test_run_compose_uses_explicit_project_name(
     app = steward.AppManifest(
         version=1,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -357,7 +388,7 @@ def test_run_compose_uses_manifest_pull_policy(
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -386,7 +417,7 @@ def test_reconcile_app_manual_sync_skips_apply(monkeypatch: pytest.MonkeyPatch) 
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -433,7 +464,7 @@ def test_reconcile_app_auto_sync_applies_changes(monkeypatch: pytest.MonkeyPatch
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -480,7 +511,7 @@ def test_reconcile_app_sets_synced_status_when_up_to_date(monkeypatch: pytest.Mo
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -516,7 +547,7 @@ def test_reconcile_app_sets_unknown_status_on_fetch_failure(monkeypatch: pytest.
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -545,7 +576,7 @@ def test_sqlite_state_roundtrip_includes_sync_status(tmp_path: Path, monkeypatch
         "node": steward.GITOPS_NODE_NAME,
         "apps": {
             "demo": {
-                "repo": "https://example.com/repo.git",
+                "repo": "git@example.com:org/repo.git",
                 "ref": "main",
                 "ref_type": "branch",
                 "enabled": True,
@@ -588,7 +619,7 @@ def test_evaluate_health_status_progressing_when_delay_not_elapsed() -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -608,7 +639,7 @@ def test_evaluate_health_status_degraded_manual_no_auto_apply(monkeypatch: pytes
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -644,7 +675,7 @@ def test_evaluate_health_status_degraded_auto_attempts_apply(monkeypatch: pytest
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -670,7 +701,7 @@ def test_detect_live_drift_missing_service(monkeypatch: pytest.MonkeyPatch) -> N
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -696,7 +727,7 @@ def test_reconcile_app_synced_drift_manual_logs_skipped_operation(monkeypatch: p
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -739,7 +770,7 @@ def test_reconcile_app_synced_drift_auto_self_heals(monkeypatch: pytest.MonkeyPa
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -779,7 +810,7 @@ def test_sync_failure_sends_notification(monkeypatch: pytest.MonkeyPatch) -> Non
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -821,7 +852,7 @@ def test_spawn_compose_helper_uses_explicit_project_name(
     app = steward.AppManifest(
         version=1,
         name="steward",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -876,7 +907,7 @@ def test_sync_app_returns_git_apply_failure(monkeypatch: pytest.MonkeyPatch) -> 
     app = steward.AppManifest(
         version=1,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -897,7 +928,7 @@ def test_sync_app_returns_success(monkeypatch: pytest.MonkeyPatch) -> None:
     app = steward.AppManifest(
         version=1,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -930,7 +961,7 @@ def test_sqlite_state_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         },
         "apps": {
             "demo": {
-                "repo": "https://example.com/repo.git",
+                "repo": "git@example.com:org/repo.git",
                 "ref": "main",
                 "ref_type": "branch",
                 "enabled": True,
@@ -956,7 +987,7 @@ def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) ->
     disabled_app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -968,7 +999,7 @@ def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) ->
     class _FakeRepo:
         working_dir = "/tmp/control"
 
-    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "https://example.com/control.git")
+    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
     monkeypatch.setattr(steward, "_load_metrics_state", lambda: {"node": steward.GITOPS_NODE_NAME})
 
     saved: dict = {}
@@ -994,7 +1025,7 @@ def test_reconcile_returns_partial_failure_when_status_writeback_fails(
     disabled_app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -1008,7 +1039,7 @@ def test_reconcile_returns_partial_failure_when_status_writeback_fails(
 
     saved: dict = {}
 
-    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "https://example.com/control.git")
+    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
     monkeypatch.setattr(steward, "_load_metrics_state", lambda: {"node": steward.GITOPS_NODE_NAME})
     monkeypatch.setattr(steward, "_save_metrics_state", lambda state: saved.update(state))
     monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
@@ -1062,7 +1093,7 @@ def test_reconcile_app_auto_sync_respects_global_dry_run(monkeypatch: pytest.Mon
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",
@@ -1111,7 +1142,7 @@ def test_reconcile_app_synced_drift_auto_self_heal_increments_oob_counter(
     app = steward.AppManifest(
         version=2,
         name="demo",
-        repo="https://example.com/repo.git",
+        repo="git@example.com:org/repo.git",
         ref=steward.AppRef(branch="main"),
         path=".",
         compose_file="docker-compose.yml",

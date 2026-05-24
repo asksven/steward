@@ -40,3 +40,13 @@ services:
       # Persistent git repos — bind-mounted so the host path is predictable
       # Set STEWARD_DATA_DIR in .env to control the outside path
       - ${STEWARD_DATA_DIR:-./steward-data}:/git
+
+    secrets:
+      - ssh_key
+      - ssh_known_hosts
+
+secrets:
+  ssh_key:
+    file: ${SSH_KEY_FILE:-~/.ssh/id_ed25519}
+  ssh_known_hosts:
+    file: ${SSH_KNOWN_HOSTS_FILE:-~/.ssh/known_hosts}

@@ -136,6 +136,32 @@ def strip_url_credentials(url: str) -> str:
     return url
 
 
+def is_ssh_url(url: str) -> bool:
+    """Return True if the URL is an SSH git URL (git@host:... or ssh://)."""
+    if url.startswith("git@") or url.startswith("ssh://"):
+        return True
+    try:
+        p = urlparse(url)
+        if p.scheme == "ssh":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def validate_repo_url(url: str, context: str = "repo") -> Optional[str]:
+    """Validate that a repo URL uses SSH. Returns error message or None if valid."""
+    if not url:
+        return f"{context}: URL is empty"
+    if not is_ssh_url(url):
+        return (
+            f"{context}: only SSH URLs are supported "
+            f"(git@host:path or ssh://host/path). "
+            f"Got: {strip_url_credentials(url)}"
+        )
+    return None
+
+
 def _load_metrics_state() -> dict:
     return load_sqlite_state(DB_FILE, GITOPS_NODE_NAME)
 
@@ -388,6 +414,10 @@ def parse_manifest(manifest_path: Path) -> AppManifest:
     repo = raw.get("repo")
     if not repo:
         errors.append("missing required field: repo")
+    else:
+        url_err = validate_repo_url(repo, context="repo")
+        if url_err:
+            errors.append(url_err)
 
     # ref
     ref_raw = raw.get("ref")
@@ -1272,6 +1302,11 @@ def reconcile() -> int:
     """
     if not CONTROL_REPO_URL:
         log.error("CONTROL_REPO_URL is not set")
+        return 2
+
+    url_err = validate_repo_url(CONTROL_REPO_URL, context="CONTROL_REPO_URL")
+    if url_err:
+        log.error(url_err)
         return 2
 
     start_time = time.time()
