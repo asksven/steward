@@ -360,7 +360,7 @@ def _write_status_snapshot(control_repo: Repo, state: dict) -> bool:
         control_repo.index.commit(f"steward: update status for {GITOPS_NODE_NAME}")
         control_repo.remotes.origin.push(CONTROL_REPO_BRANCH)
         return True
-    except GitCommandError as e:
+    except (GitCommandError, OSError, PermissionError) as e:
         log.error("Status writeback failed: %s", e)
         return False
 
@@ -731,12 +731,15 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
 
     log.info("Reconciling app '%s': %s", app.name, " ".join(cmd))
 
+    workdir = stack_path / app.path
+
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             env=env,
+            cwd=str(workdir),
             timeout=300,
         )
         if result.stdout:
@@ -777,12 +780,15 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
             return None
         cmd.extend(["--env-file", str(env_path)])
 
+    workdir = stack_path / app.path
+
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             env=os.environ.copy(),
+            cwd=str(workdir),
             timeout=60,
         )
         if result.returncode != 0:
@@ -840,12 +846,15 @@ def _load_expected_services(app: AppManifest, stack_path: Path) -> Optional[set[
             return None
         cmd.extend(["--env-file", str(env_path)])
 
+    workdir = stack_path / app.path
+
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             env=os.environ.copy(),
+            cwd=str(workdir),
             timeout=60,
         )
         if result.returncode != 0:

@@ -54,19 +54,19 @@ if [ "${STEWARD_UID}" != "0" ]; then
 
   # Generate a runtime crontab that runs jobs as the target user with the correct HOME
   cat > /tmp/crontab-runtime <<EOF
-* * * * * su-exec ${STEWARD_UID}:${STEWARD_GID} env HOME=${STEWARD_HOME} python3 /app/steward.py reconcile >> /proc/1/fd/1 2>&1
+* * * * * su-exec ${STEWARD_UID}:${STEWARD_GID} env HOME=${STEWARD_HOME} sh -lc 'cd /app && python3 /app/steward.py reconcile' >> /proc/1/fd/1 2>&1
 EOF
   crontab /tmp/crontab-runtime
   echo "Crontab installed"
 
   echo "Running initial reconciliation..."
-  su-exec "${STEWARD_UID}:${STEWARD_GID}" env HOME="${STEWARD_HOME}" python3 /app/steward.py reconcile || true
+  su-exec "${STEWARD_UID}:${STEWARD_GID}" env HOME="${STEWARD_HOME}" sh -lc 'cd /app && python3 /app/steward.py reconcile' || true
 else
   crontab /etc/cron/crontab
   echo "Crontab installed"
 
   echo "Running initial reconciliation..."
-  python3 /app/steward.py reconcile || true
+  sh -lc 'cd /app && python3 /app/steward.py reconcile' || true
 fi
 
 # Start cron in foreground, log to stdout
