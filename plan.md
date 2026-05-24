@@ -1041,7 +1041,7 @@ Benefits:
 
 | # | Decision | Options | Consideration |
 |---|---|---|---|
-| 1 | **Primary credential mechanism** | (a) Docker secrets only, (b) Docker secrets + SSH agent, (c) All three (secrets, agent, legacy bind-mount) | UX simplicity vs flexibility. Option (c) is most compatible but increases attack surface documentation. |
+| 1 | **Primary credential mechanism** | (a) Docker secrets only, (b) Docker secrets + SSH agent, (c) All three (secrets, agent, legacy bind-mount) | UX simplicity vs flexibility. Option (c) is most compatible but increases attack surface and documentation complexity. |
 | 2 | **Credential config format** | (a) Separate `credentials.yml` file, (b) Environment variables pointing to secret files, (c) Inline in docker-compose env | (a) is most expressive; (b) is simpler for single-repo setups. |
 | 3 | **Per-app vs global credentials** | (a) Single credential set for all repos, (b) Per-URL-pattern matching, (c) Per-app `credential_ref` in manifest | (b) balances flexibility and simplicity. (c) couples credential info to manifest. |
 | 4 | **Deprecation timeline for `~/.ssh` bind-mount** | (a) Deprecate immediately, remove in next major, (b) Keep indefinitely as fallback, (c) Warn but never remove | Must consider existing users. (b) is safest for adoption. |
