@@ -61,13 +61,18 @@ See the companion **homelab-gitops** README for the control repo structure. Crea
 Create a `.env` file next to `docker-compose.yml`:
 
 ```env
-CONTROL_REPO_URL=https://oauth2:<token>@github.com/you/homelab-gitops
+CONTROL_REPO_URL=git@github.com:you/homelab-gitops.git
 GITOPS_NODE_NAME=node1.lan
 AGENT_IMAGE=ghcr.io/<you>/steward:latest
 STEWARD_DATA_DIR=/opt/steward-data
+SSH_KEY_FILE=/home/you/.ssh/id_ed25519
+SSH_KNOWN_HOSTS_FILE=/home/you/.ssh/known_hosts
 ```
 
 `GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo.
+
+> **Note:** Only SSH URLs are supported (`git@host:path` or `ssh://host/path`).
+> HTTPS URLs with embedded tokens are **not** supported.
 
 ### 4. Run as a non-root user (recommended)
 
@@ -80,9 +85,82 @@ echo "STEWARD_GID=$(id -g)" >> .env
 
 The entrypoint creates `/home/steward` inside the container owned by that UID. SSH key files are placed there automatically (see step 5).
 
-### 5. Set up SSH authentication (if using SSH repo URLs)
+### 5. Set up SSH authentication
 
-Skip this step if all your repos use HTTPS URLs. If any repo uses an SSH URL (`git@github.com:...`), follow the [SSH key](#ssh-key) setup below before starting the container.
+Steward **only supports SSH** for git operations. All repo URLs must use SSH format (`git@github.com:...` or `ssh://...`).
+
+#### Single key (one git host)
+
+The SSH key is delivered via Docker Compose secrets. Set the path to your deploy key in `.env`:
+
+```env
+SSH_KEY_FILE=/home/you/.ssh/id_ed25519
+SSH_KNOWN_HOSTS_FILE=/home/you/.ssh/known_hosts
+```
+
+The entrypoint reads the key from `/run/secrets/ssh_key` at startup and configures SSH automatically. No manual volume mounts are needed.
+
+To generate a dedicated deploy key:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
+```
+
+Then add the public key as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
+
+#### Multiple keys (e.g. GitHub + GitLab)
+
+For setups with keys across multiple git hosts, create a `credentials.yml` file on the host and mount it into the container. This file maps host patterns to the Docker secret that holds each key.
+
+**1. Create `credentials.yml`** (e.g. `/etc/steward/credentials.yml`):
+
+```yaml
+credentials:
+  - pattern: github.com
+    key_file: /run/secrets/github_key
+  - pattern: gitlab.com
+    key_file: /run/secrets/gitlab_key
+known_hosts_file: /run/secrets/ssh_known_hosts   # optional
+```
+
+**2. Update `docker-compose.yml`** to add secrets and mount the credentials file:
+
+```yaml
+services:
+  steward:
+    volumes:
+      - /etc/steward/credentials.yml:/app/credentials.yml:ro
+    secrets:
+      - github_key
+      - gitlab_key
+      - ssh_known_hosts   # optional
+
+secrets:
+  github_key:
+    file: /home/you/.ssh/github_deploy_key
+  gitlab_key:
+    file: /home/you/.ssh/gitlab_deploy_key
+  ssh_known_hosts:
+    file: /home/you/.ssh/known_hosts
+```
+
+When `credentials.yml` is present, steward uses it and ignores the single-key `ssh_key` secret.
+
+#### Migrating from the legacy `~/.ssh-host` bind-mount
+
+> **Breaking change in 0.3.0:** If the `/root/.ssh-host` directory is mounted, steward will **exit with an error** on startup. The old bind-mount path has been removed. You must migrate before upgrading.
+
+**Migration steps:**
+
+1. Generate a dedicated deploy key per git host (do not reuse `~/.ssh/id_rsa` or `id_ed25519`):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy_key -N "" -C "steward@$(hostname)"
+   ssh-keygen -t ed25519 -f ~/.ssh/gitlab_deploy_key -N "" -C "steward@$(hostname)"
+   ```
+2. Add each public key as a deploy key in GitHub/GitLab.
+3. Create `/etc/steward/credentials.yml` as shown in the multi-key section above.
+4. Update `docker-compose.yml`: remove the `~/.ssh:/root/.ssh-host:ro` volume, add the `credentials.yml` mount and the new secrets.
+5. Restart the container — the deprecation warning will be gone.
 
 ### 6. Start the agent
 
@@ -124,7 +202,7 @@ All configuration is via environment variables.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `CONTROL_REPO_URL` | yes | — | URL of the control repo (embed token for private repos) |
+| `CONTROL_REPO_URL` | yes | — | SSH URL of the control repo (`git@host:path` or `ssh://host/path`) |
 | `CONTROL_REPO_BRANCH` | no | `main` | Branch to track on the control repo |
 | `STEWARD_DATA_DIR` | no | `./steward-data` | Host path where git repos are cloned (outside the container) |
 | `STEWARD_UID` | no | `0` (root) | UID to run steward as — set to your host user's UID so files in `STEWARD_DATA_DIR` are not root-owned |
@@ -137,6 +215,8 @@ All configuration is via environment variables.
 | `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
 | `STEWARD_NOTIFY_URL` | no | — (disabled) | Default webhook endpoint for failure/degraded/drift notifications |
 | `STEWARD_DRY_RUN` | no | `false` | Node-wide read-only mode: detect/report drift, but never run `docker compose up` |
+| `SSH_KEY_FILE` | no | `~/.ssh/id_ed25519` | Host path to the SSH private key (used as Docker secret source). Use absolute paths in `.env`. |
+| `SSH_KNOWN_HOSTS_FILE` | no | `~/.ssh/known_hosts` | Host path to known_hosts file (used as Docker secret source). Use absolute paths in `.env`. |
 
 ---
 
@@ -147,7 +227,7 @@ Each `.yml` file in `nodes/<hostname>/` in the control repo describes one applic
 ```yaml
 version: 2                              # required, supported: 1, 2
 name: arr                               # required, used as local repo directory name
-repo: https://github.com/you/arr-stack  # required, HTTPS or SSH URL
+repo: git@github.com:you/arr-stack.git  # required, SSH URL only
 ref:
   branch: main                          # mutually exclusive with tag
   # tag: v1.2.3                         # pin to a specific release
@@ -179,66 +259,26 @@ Compatibility notes:
 
 ---
 
-## Private repos
+## Private repos (SSH only)
 
-### HTTPS with token (simplest)
+Steward exclusively uses SSH deploy keys for private repo access. HTTPS URLs with embedded tokens are **not supported**.
 
-Embed the token in the URL:
+### Docker secrets (recommended)
 
-```yaml
-# GitHub
-CONTROL_REPO_URL: https://oauth2:<token>@github.com/you/homelab-gitops
+The `docker-compose.yml` declares two secrets that are mounted at `/run/secrets/`:
 
-# GitLab
-CONTROL_REPO_URL: https://oauth2:<token>@gitlab.com/you/homelab-gitops
-```
+| Secret | Source (`.env` variable) | Default |
+|---|---|---|
+| `ssh_key` | `SSH_KEY_FILE` | `~/.ssh/id_ed25519` |
+| `ssh_known_hosts` | `SSH_KNOWN_HOSTS_FILE` | `~/.ssh/known_hosts` |
 
-Store the token in a `.env` file next to `docker-compose.yml` and reference it:
+The entrypoint copies these into the container user's `~/.ssh/` with correct permissions on every start.
 
-```yaml
-environment:
-  CONTROL_REPO_URL: https://oauth2:${GITHUB_TOKEN}@github.com/you/homelab-gitops
-```
+### Multiple hosts / keys
 
-### SSH key
+Use `credentials.yml` to map different deploy keys to different git hosts. See [Set up SSH authentication](#5-set-up-ssh-authentication) in the quick-start guide for the full setup.
 
-The container home directory for SSH keys depends on `STEWARD_UID`:
-
-| `STEWARD_UID` | SSH home inside container |
-|---|---|
-| `0` (root, default) | `/root/.ssh/` |
-| any other value | `/home/steward/.ssh/` |
-
-**Step 1** — create a container-specific SSH config on the host. The `IdentityFile` paths must point to the container-internal SSH home, not `~/.ssh/`. Using the recommended non-root setup:
-
-```
-# ~/steward-ssh-config
-Host gitlab.com
-  IdentityFile /home/steward/.ssh/id_rsa-gitlab
-  StrictHostKeyChecking yes
-
-Host github.com
-  IdentityFile /home/steward/.ssh/id_rsa-github
-  StrictHostKeyChecking yes
-```
-
-If you are running as root (`STEWARD_UID=0`), use `/root/.ssh/` instead.
-
-**Step 2** — create a `docker-compose.override.yml` that mounts your key files and the config into the staging directory `/root/.ssh-host/`:
-
-```yaml
-services:
-  steward:
-    volumes:
-      - ~/.ssh/id_rsa-gitlab:/root/.ssh-host/id_rsa-gitlab:ro
-      - ~/.ssh/id_rsa-github:/root/.ssh-host/id_rsa-github:ro
-      - ~/steward-ssh-config:/root/.ssh-host/config:ro
-      - ~/.ssh/known_hosts:/root/.ssh-host/known_hosts:ro
-```
-
-Docker Compose merges this file automatically. On startup the entrypoint copies everything from `/root/.ssh-host/` into the container user's SSH home (`/home/steward/.ssh/` or `/root/.ssh/`) with correct ownership and permissions — bind-mounted files retain the host user's UID, which SSH rejects if it does not match the running process.
-
-**Step 3** — use SSH URLs in your manifests:
+### Use SSH URLs in manifests
 
 ```yaml
 repo: git@github.com:you/arr-stack.git
@@ -276,7 +316,7 @@ Add a manifest for steward itself in the control repo under `nodes/<hostname>/`:
 ```yaml
 version: 1
 name: steward
-repo: https://github.com/<you>/steward
+repo: git@github.com:<you>/steward.git
 ref:
   branch: main
 path: .

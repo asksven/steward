@@ -87,7 +87,7 @@ def _prepare_db(path: Path, node: str) -> None:
         (
             "demo",
             node,
-            "https://example.com/repo.git",
+            "git@example.com:org/repo.git",
             "main",
             "branch",
             1,

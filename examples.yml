@@ -16,7 +16,7 @@
 # Copy this to nodes/<hostname>/arr.yml and customize
 version: 2
 name: arr
-repo: https://github.com/you/arr-stack
+repo: git@github.com:you/arr-stack.git
 ref:
   branch: main
 path: .
@@ -30,7 +30,7 @@ enabled: true
 # templates/prometheus-node-exporter.yml
 version: 2
 name: prometheus-node-exporter
-repo: https://github.com/you/prometheus-stack
+repo: git@github.com:you/prometheus-stack.git
 ref:
   branch: main
 path: .
@@ -44,7 +44,7 @@ enabled: true
 # nodes/node1.lan/arr.yml
 version: 2
 name: arr
-repo: https://github.com/you/arr-stack
+repo: git@github.com:you/arr-stack.git
 ref:
   branch: main
 path: .
@@ -58,7 +58,7 @@ enabled: true
 # nodes/node1.lan/prometheus-node-exporter.yml
 version: 2
 name: prometheus-node-exporter
-repo: https://github.com/you/prometheus-stack
+repo: git@github.com:you/prometheus-stack.git
 ref:
   tag: v1.8.0          # pinned to a release tag on this node
 path: .
