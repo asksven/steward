@@ -41,12 +41,10 @@ services:
       # Set STEWARD_DATA_DIR in .env to control the outside path
       - ${STEWARD_DATA_DIR:-./steward-data}:/git
 
-    secrets:
-      - ssh_key
-      - ssh_known_hosts
-
-secrets:
-  ssh_key:
-    file: ${SSH_KEY_FILE:-~/.ssh/id_ed25519}
-  ssh_known_hosts:
-    file: ${SSH_KNOWN_HOSTS_FILE:-~/.ssh/known_hosts}
+    # SSH credentials are configured via credentials.yml (recommended) or Docker secrets.
+    # See README §5 "Set up SSH authentication" for setup instructions.
+    # For single-key Docker secrets, add to docker-compose.override.yml:
+    #   secrets:
+    #     - ssh_key
+    #     - ssh_known_hosts   # optional
+    # and define a top-level secrets block pointing to your key files.

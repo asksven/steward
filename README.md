@@ -65,8 +65,6 @@ CONTROL_REPO_URL=git@github.com:you/homelab-gitops.git
 GITOPS_NODE_NAME=node1.lan
 AGENT_IMAGE=ghcr.io/<you>/steward:latest
 STEWARD_DATA_DIR=/opt/steward-data
-SSH_KEY_FILE=/home/you/.ssh/id_ed25519
-SSH_KNOWN_HOSTS_FILE=/home/you/.ssh/known_hosts
 ```
 
 `GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo.
@@ -215,8 +213,6 @@ All configuration is via environment variables.
 | `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
 | `STEWARD_NOTIFY_URL` | no | — (disabled) | Default webhook endpoint for failure/degraded/drift notifications |
 | `STEWARD_DRY_RUN` | no | `false` | Node-wide read-only mode: detect/report drift, but never run `docker compose up` |
-| `SSH_KEY_FILE` | no | `~/.ssh/id_ed25519` | Host path to the SSH private key (used as Docker secret source). Use absolute paths in `.env`. |
-| `SSH_KNOWN_HOSTS_FILE` | no | `~/.ssh/known_hosts` | Host path to known_hosts file (used as Docker secret source). Use absolute paths in `.env`. |
 
 ---
 
@@ -263,16 +259,25 @@ Compatibility notes:
 
 Steward exclusively uses SSH deploy keys for private repo access. HTTPS URLs with embedded tokens are **not supported**.
 
-### Docker secrets (recommended)
+### Docker secrets (single key)
 
-The `docker-compose.yml` declares two secrets that are mounted at `/run/secrets/`:
+For a single-key setup, declare the secrets in `docker-compose.override.yml` — **not** the base `docker-compose.yml` (which has no hardcoded secret paths to avoid startup failures on hosts where the files don't exist):
 
-| Secret | Source (`.env` variable) | Default |
-|---|---|---|
-| `ssh_key` | `SSH_KEY_FILE` | `~/.ssh/id_ed25519` |
-| `ssh_known_hosts` | `SSH_KNOWN_HOSTS_FILE` | `~/.ssh/known_hosts` |
+```yaml
+services:
+  steward:
+    secrets:
+      - ssh_key
+      - ssh_known_hosts   # optional
 
-The entrypoint copies these into the container user's `~/.ssh/` with correct permissions on every start.
+secrets:
+  ssh_key:
+    file: /home/you/.ssh/steward_deploy_key
+  ssh_known_hosts:
+    file: /home/you/.ssh/known_hosts
+```
+
+The entrypoint reads `/run/secrets/ssh_key` at startup and configures SSH automatically.
 
 ### Multiple hosts / keys
 
