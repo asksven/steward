@@ -1100,29 +1100,45 @@ def sync_app(app: AppManifest, repo: Repo, stack_path: Path) -> SyncResult:
 # Main reconciliation loop
 # ---------------------------------------------------------------------------
 
-def load_node_manifests(control_repo: Repo) -> tuple[list[AppManifest], int]:
+def load_node_manifests(
+    control_repo: Repo,
+) -> tuple[list[AppManifest], list[tuple[str, str, str]]]:
     """
     Load all app manifests for this node from the control repo.
-    Returns (manifests, parse_error_count).
+    Returns (manifests, parse_error_entries) where each error entry is a
+    (filename, app_name, error_msg) tuple. app_name is extracted from the raw
+    YAML ``name`` key, falling back to the file stem when parsing fails.
     """
     node_dir = Path(control_repo.working_dir) / "nodes" / GITOPS_NODE_NAME
     if not node_dir.exists():
         log.warning("No manifest directory found for node '%s' at %s", GITOPS_NODE_NAME, node_dir)
-        return [], 0
+        return [], []
 
-    manifests = []
-    parse_errors = 0
+    manifests: list[AppManifest] = []
+    parse_error_entries: list[tuple[str, str, str]] = []
     for manifest_file in sorted(node_dir.glob("*.yml")):
         try:
             manifest = parse_manifest(manifest_file)
             manifests.append(manifest)
             log.debug("Loaded manifest: %s (enabled=%s)", manifest.name, manifest.enabled)
         except (ValueError, yaml.YAMLError) as e:
+            # Best-effort app name extraction so we can track the error in metrics.
+            try:
+                raw = yaml.safe_load(manifest_file.read_text())
+                app_name = raw.get("name") if isinstance(raw, dict) else None
+            except Exception:
+                app_name = None
+            app_name = app_name or manifest_file.stem
             log.error("Skipping invalid manifest %s: %s", manifest_file.name, e)
-            parse_errors += 1
+            parse_error_entries.append((manifest_file.name, app_name, str(e)))
 
-    log.info("Loaded %d manifest(s) for node '%s' (%d parse error(s))", len(manifests), GITOPS_NODE_NAME, parse_errors)
-    return manifests, parse_errors
+    log.info(
+        "Loaded %d manifest(s) for node '%s' (%d parse error(s))",
+        len(manifests),
+        GITOPS_NODE_NAME,
+        len(parse_error_entries),
+    )
+    return manifests, parse_error_entries
 
 
 def reconcile_app(app: AppManifest, state: dict) -> bool:
@@ -1456,11 +1472,11 @@ def reconcile() -> int:
         log.warning("Control repo sync failed; continuing with cached manifests")
 
     # Step 2: load manifests for this node
-    manifests, parse_errors = load_node_manifests(control_repo)
-    if parse_errors:
-        _inc(state, "reconcile", "manifest_parse_errors", by=parse_errors)
+    manifests, parse_error_entries = load_node_manifests(control_repo)
+    if parse_error_entries:
+        _inc(state, "reconcile", "manifest_parse_errors", by=len(parse_error_entries))
 
-    if not manifests:
+    if not manifests and not parse_error_entries:
         log.info("No apps to reconcile")
         end_time = time.time()
         rec = state.setdefault("reconcile", {})
@@ -1471,7 +1487,20 @@ def reconcile() -> int:
         return 0
 
     # Step 3: reconcile each enabled app
-    results = {}
+    results: dict[str, str] = {}
+
+    # Treat parse-error apps as failed so they appear in metrics and alerts.
+    for _filename, app_name, _err_msg in parse_error_entries:
+        app_state = state.setdefault("apps", {}).setdefault(app_name, {})
+        app_state.update({
+            "enabled": True,
+            "sync_status": SyncStatus.UNKNOWN.value,
+            "health_status": HEALTH_STATUS_UNKNOWN,
+            "last_reconcile_timestamp": time.time(),
+        })
+        _inc(app_state, "reconcile_total", "failed")
+        results[app_name] = "failed"
+
     for app in manifests:
         if not app.enabled:
             log.info("App '%s' is disabled, skipping", app.name)
@@ -1508,11 +1537,12 @@ def reconcile() -> int:
     # Summary
     failed = [name for name, status in results.items() if status == "failed"]
     log.info(
-        "Reconciliation complete | total=%d disabled=%d ok=%d failed=%d",
+        "Reconciliation complete | total=%d disabled=%d ok=%d failed=%d parse_errors=%d",
         len(results),
         sum(1 for s in results.values() if s == "disabled"),
         sum(1 for s in results.values() if s == "ok"),
         len(failed),
+        len(parse_error_entries),
     )
 
     end_time = time.time()

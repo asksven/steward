@@ -413,6 +413,7 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 | Repeated reconcile failures | `increase(steward_app_reconcile_total{result="failed"}[15m]) > 2` | warning |
 | Node not reporting | `time() - steward_reconcile_last_timestamp_seconds > 300` | critical |
 | App not reconciled | `time() - steward_app_last_reconcile_timestamp_seconds > 300` | warning |
+| Manifest parse error | `increase(steward_manifest_parse_errors_total[5m]) > 0` | warning |
 
 ---
 

@@ -683,6 +683,39 @@ groups:
         noDataState: OK
         execErrState: Error
         isPaused: false
+
+      - uid: steward-manifest-parse-error
+        title: "Steward — Manifest parse error"
+        condition: threshold
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Manifest parse error on {{ $labels.node }}"
+          description: "steward_manifest_parse_errors_total increased in the last 5 minutes. A manifest file in the control repo is invalid and the app is being tracked as failed."
+        data:
+          - refId: query
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: REPLACE_WITH_YOUR_PROMETHEUS_UID
+            model:
+              expr: 'increase(steward_manifest_parse_errors_total[5m])'
+              instant: true
+              refId: query
+          - refId: threshold
+            datasourceUid: "-100"
+            model:
+              type: threshold
+              expression: query
+              refId: threshold
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+                  operator: {type: and}
+                  reducer: {type: last, params: []}
+                  query: {params: [query]}
+                  type: query
+        noDataState: OK
+        execErrState: Error
+        isPaused: false
 ```
 
 ### Option B — manual creation via UI
@@ -698,3 +731,4 @@ Go to **Alerting → Alert rules → New alert rule** and use these PromQL expre
 | App health degraded | `steward_app_health_status{status="Degraded"}` | `> 0` | warning |
 | App remains out of sync | `steward_app_sync_status{status="OutOfSync"}` | `> 0` for 10m | warning |
 | Control repo sync failed | `increase(steward_control_repo_sync_total{result="failed"}[15m])` | `> 0` | warning |
+| Manifest parse error | `increase(steward_manifest_parse_errors_total[5m])` | `> 0` | warning |

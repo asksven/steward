@@ -1004,6 +1004,123 @@ Benefits:
 
 ---
 
+## Goal 7 — Fix parse-error visibility in reconcile metrics
+
+### Problem
+
+When a manifest fails to parse (e.g. bad URL, missing required field, YAML syntax error), steward silently drops the app. This causes three cascading problems that make the failure nearly invisible:
+
+| Bug | Observable symptom |
+|---|---|
+| Parse-error apps never added to `results` dict | Summary log shows `total=2 ok=2 failed=0` even though 3 manifests exist — steward.yml silently absent |
+| `run_result` computed only from `results` | `steward_reconcile_total{result="partial_failure"}` never fires when only parse errors occur; run records as `success` |
+| Stale SQLite state persists unchanged | Metrics show old `Synced` status and old timestamp for the failing app; "Repeated reconcile failures" never fires; "App not reconciled" fires only after 5+ minutes due to timestamp aging |
+
+**Confirmed from production log:**
+
+```
+2026-05-25T10:45:02 ERROR [steward] Skipping invalid manifest steward.yml: Invalid manifest … repo: only SSH URLs are supported …
+2026-05-25T10:45:08 INFO  [steward] Reconciliation complete | total=2 disabled=0 ok=2 failed=0
+```
+
+Three manifests exist on disk; one failed to parse; log and metrics show only two.
+
+**Operational note:** The specific error message in the production log ("only SSH URLs are supported") comes from old deployed code predating the HTTPS support commit already in the codebase. That error resolves on next rebuild/deploy. These fixes improve observability for any future parse errors.
+
+---
+
+### Design decisions
+
+- **Parse-error apps are treated as `failed` apps** throughout the reconcile pipeline — they get a `results` entry, app state written to SQLite, and `reconcile_total.failed` incremented every cycle.
+- **`sync_status = Unknown`, `health_status = Unknown`** — we literally cannot know the state when the manifest is unparseable; neither `Degraded` nor `OutOfSync` is correct.
+- **`last_reconcile_timestamp` updated every cycle** — prevents "App not reconciled" from falsely firing for parse-error apps, and lets "Repeated reconcile failures" carry the signal instead.
+- **`parse_errors=N` always included in summary log line** (option A) — consistent, parseable, makes `parse_errors=0` explicitly visible.
+- **App name fallback = `manifest_file.stem`** — consistent with how steward normally derives app names from filenames (e.g. `steward.yml` → `steward`).
+- **New global alert on `steward_manifest_parse_errors_total`** — fires on the very first parse error, before "Repeated reconcile failures" accumulates 3 cycles. Complementary, not redundant.
+- **Not in scope:** removing stale SQLite rows when a manifest file is intentionally deleted — different problem with different tradeoffs.
+
+---
+
+### Dashboard & alert impact analysis
+
+#### Existing alerts
+
+| Alert | Impact |
+|---|---|
+| Compose apply failed (`steward_app_sync_total{result="failed"}`) | No impact — parse-error apps never reach `run_compose` |
+| **Repeated reconcile failures** (`steward_app_reconcile_total{result="failed"}[15m] > 2`) | ✅ Will now fire — this is the intended signal for parse-error apps |
+| Node not reporting | No impact |
+| **App not reconciled** (`time() - steward_app_last_reconcile_timestamp_seconds > 300`) | ✅ Fixed — no longer falsely fires for parse-error apps once timestamp is updated each cycle |
+| App health degraded | No impact — Unknown is written, not Degraded |
+| App remains out of sync | No impact — Unknown is written, not OutOfSync |
+| Control repo sync failed | No impact |
+
+#### Dashboard panels
+
+| Panel | Impact |
+|---|---|
+| Active Apps (`count(steward_app_info{enabled="true"})`) | Parse-error apps appear in count (same as today with stale state — no regression) |
+| Apply Failures (1h) | No impact |
+| App Status table — Reconcile Failures (1h) column | ✅ Now shows incrementing count for parse-error app instead of blank/stale |
+| App Status table — Last Reconcile (s ago) column | ✅ Shows fresh timestamp instead of growing stale age |
+
+---
+
+### Implementation plan
+
+**Phase 1 — Richer return type from `load_node_manifests`** — `steward.py` ~line 1099
+
+Change return type from `(list[AppManifest], int)` to `(list[AppManifest], list[tuple[str, str, str]])`.  
+Each error tuple: `(filename, app_name, error_msg)` where `app_name` is the `name` key extracted from raw YAML via `yaml.safe_load()`, falling back to `manifest_file.stem` if parsing fails or the key is absent.  
+Update docstring.
+
+**Phase 2 — Write error state + add to `results`** — `steward.py` `reconcile()` ~lines 1459–1475
+
+At the call site, rename `parse_errors` → `parse_error_entries`; update `_inc` to use `len(parse_error_entries)`.
+
+After `results = {}` is initialized, add a loop over `parse_error_entries` that for each entry:
+- Writes `state["apps"][app_name]` with `enabled=True`, `sync_status=Unknown`, `health_status=Unknown`, `last_reconcile_timestamp=time.time()`
+- Calls `_inc(app_state, "reconcile_total", "failed")`
+- Sets `results[app_name] = "failed"`
+
+Cascade effects (no other code changes needed):
+- `total` and `failed` counts correct in summary log
+- `run_result = "partial_failure" if failed else "success"` naturally becomes `partial_failure`
+- Per-app `reconcile_total{result="failed"}` increments → "Repeated reconcile failures" fires after 3 cycles
+- `last_reconcile_timestamp` stays fresh → "App not reconciled" stops falsely firing
+
+**Phase 3 — `parse_errors=N` always in summary log** — `steward.py` ~line 1511
+
+Change format string to `"Reconciliation complete | total=%d disabled=%d ok=%d failed=%d parse_errors=%d"` and add `len(parse_error_entries)` as final arg.
+
+**Phase 4 — Tests** — `tests/test_steward.py`
+
+- Fix two broken monkeypatches: lines 1245 and 1279 — change `([..., 0)` → `([..., [])`
+- Add test: parse-error entry → `results[app_name] == "failed"` and `state["apps"][name]["sync_status"] == "Unknown"`
+- Add test: `run_result` is `partial_failure` when `load_node_manifests` returns non-empty error list
+
+**Phase 5 — New alert in README_prometheus.md**
+
+Add `steward-manifest-parse-error` alert (in both provisioning YAML and Option B table):
+- Expression: `increase(steward_parse_errors_total[5m]) > 0`
+- Severity: `warning`
+- `for: 0s`
+- Description: fires on the first parse error, before "Repeated reconcile failures" accumulates
+
+Also add `steward_manifest_parse_errors_total` to the Grafana alert summary table in `README.md`.
+
+---
+
+### Status
+
+- [x] Phase 1 — Richer return type
+- [x] Phase 2 — Write error state + results entry
+- [x] Phase 3 — parse_errors in summary log
+- [x] Phase 4 — Tests
+- [x] Phase 5 — New alert in README_prometheus.md + README.md
+
+---
+
 ## Non-goals
 
 These ArgoCD concepts are deliberately out of scope for steward's design. They are listed here

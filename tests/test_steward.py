@@ -1242,7 +1242,7 @@ def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(steward, "_save_metrics_state", _fake_save)
     monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
     monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
-    monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([disabled_app], 0))
+    monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([disabled_app], []))
     monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: True)
 
     result = steward.reconcile()
@@ -1276,7 +1276,7 @@ def test_reconcile_returns_partial_failure_when_status_writeback_fails(
     monkeypatch.setattr(steward, "_save_metrics_state", lambda state: saved.update(state))
     monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
     monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
-    monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([disabled_app], 0))
+    monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([disabled_app], []))
     monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: False)
 
     result = steward.reconcile()
@@ -1459,3 +1459,71 @@ def test_operation_retention_prunes_old_rows(tmp_path: Path, monkeypatch: pytest
     conn.close()
 
     assert rows == [("2099-01-01T00:00:00Z", "new")]
+
+
+# ---------------------------------------------------------------------------
+# Goal 7 — parse-error visibility in reconcile metrics
+# ---------------------------------------------------------------------------
+
+def test_reconcile_parse_error_app_appears_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manifest that fails to parse is recorded as 'failed' in results and metrics."""
+
+    class _FakeRepo:
+        working_dir = "/tmp/control"
+
+    saved: dict = {}
+
+    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
+    monkeypatch.setattr(steward, "_load_metrics_state", lambda: {"node": steward.GITOPS_NODE_NAME})
+    monkeypatch.setattr(steward, "_save_metrics_state", lambda state: saved.update(state))
+    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
+    monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
+    monkeypatch.setattr(
+        steward,
+        "load_node_manifests",
+        lambda _repo: ([], [("steward.yml", "steward", "repo: only SSH URLs are supported")]),
+    )
+    monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: True)
+
+    result = steward.reconcile()
+
+    assert result == 1
+    assert saved["apps"]["steward"]["sync_status"] == steward.SyncStatus.UNKNOWN.value
+    assert saved["apps"]["steward"]["health_status"] == steward.HEALTH_STATUS_UNKNOWN
+    assert saved["apps"]["steward"]["reconcile_total"]["failed"] >= 1
+    assert saved["reconcile"]["total"]["partial_failure"] == 1
+    assert saved["reconcile"]["manifest_parse_errors"] == 1
+
+
+def test_reconcile_parse_error_run_result_is_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run with only parse errors records partial_failure, not success."""
+
+    class _FakeRepo:
+        working_dir = "/tmp/control"
+
+    saved: dict = {}
+
+    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
+    monkeypatch.setattr(steward, "_load_metrics_state", lambda: {"node": steward.GITOPS_NODE_NAME})
+    monkeypatch.setattr(steward, "_save_metrics_state", lambda state: saved.update(state))
+    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
+    monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
+    monkeypatch.setattr(
+        steward,
+        "load_node_manifests",
+        lambda _repo: (
+            [],
+            [
+                ("app1.yml", "app1", "missing required field 'repo'"),
+                ("app2.yml", "app2", "invalid URL scheme"),
+            ],
+        ),
+    )
+    monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: True)
+
+    result = steward.reconcile()
+
+    assert result == 1
+    assert "success" not in saved.get("reconcile", {}).get("total", {})
+    assert saved["reconcile"]["total"]["partial_failure"] == 1
+    assert saved["reconcile"]["manifest_parse_errors"] == 2
