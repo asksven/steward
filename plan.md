@@ -860,6 +860,221 @@ mounts; falls back to direct `compose up` if path resolution fails.
 
 ---
 
+## Goal 6 — Improve security: git credential handling
+
+Steward currently has two mechanisms for authenticating to git repositories (control repo and
+app repos):
+
+1. **SSH keys** — bind-mounted from the host's `~/.ssh/` into the container via
+   `/root/.ssh-host/` staging directory, then copied into the container user's SSH home with
+   corrected ownership/permissions.
+2. **HTTPS tokens** — embedded directly in the repo URL (e.g.
+   `https://oauth2:<token>@github.com/...`), stored either in the `.env` file next to
+   `docker-compose.yml` or — if used in app manifests — potentially committed to the control
+   repo itself.
+
+Both approaches present security concerns that will cause pushback from security-conscious
+users and limit adoption in team/enterprise environments.
+
+---
+
+### 6.1 Security analysis — current state
+
+**Problem 1 — SSH key exposure via host filesystem access:**
+
+The current model requires steward to read private SSH keys from the host's `~/.ssh/` directory
+(bind-mounted read-only). This is problematic because:
+
+- The `~/.ssh/` directory typically contains keys for *all* services the user authenticates to
+  (not just git), violating the principle of least privilege.
+- If an attacker compromises the steward container, they gain access to all mounted keys.
+- The keys are copied into the container filesystem at startup (by `entrypoint.sh`) and persist
+  there for the container's lifetime — not in-memory-only.
+- There is no key rotation mechanism; keys are static for the container lifetime.
+- Sharing host SSH identity with a container running as a different UID is operationally fragile
+  and requires the documented multi-step SSH config workaround.
+
+**Problem 2 — HTTPS tokens in URLs (control repo and app repos):**
+
+- For the control repo: the token is in `CONTROL_REPO_URL` env var, sourced from `.env` on the
+  host. This is acceptable if `.env` is properly secured, but the token is exposed to any
+  process that inspects the container environment (`docker inspect`, `/proc/*/environ`).
+- For app repos: if a user defines `repo: https://oauth2:<token>@github.com/...` in a manifest
+  YAML file in the control repo, **the token is committed to git** — a well-known antipattern
+  that exposes credentials in repository history permanently.
+- Tokens embedded in URLs can leak into logs, error messages, and metrics. Steward already
+  mitigates this with `strip_url_credentials()` for metrics, but other code paths (GitPython
+  exceptions, git CLI stderr) may still leak.
+
+**Problem 3 — No separation between control-plane and data-plane credentials:**
+
+There is no distinction between the credential used to fetch the control repo and the
+credentials used to fetch individual app repos. In a multi-repo setup, a single set of keys
+or tokens must have access to all repositories — violating least-privilege.
+
+---
+
+### 6.2 Proposed improvements
+
+The following improvements are ordered by impact and feasibility for the steward deployment
+model (single-node Docker Compose, no Kubernetes/Swarm requirement).
+
+---
+
+#### 6.2.1 Support Docker Compose secrets for credential injection
+
+**Industry standard:** Docker Compose `secrets` top-level element (file-based secrets mounted
+to `/run/secrets/<name>`, read-only, in-memory tmpfs on Linux).
+
+**Proposed solution:** Accept credentials via file references rather than environment variables
+or bind-mounted SSH directories:
+
+```yaml
+# docker-compose.override.yml
+services:
+  steward:
+    secrets:
+      - git_ssh_key
+      - control_repo_token
+
+secrets:
+  git_ssh_key:
+    file: ./steward-deploy-key   # dedicated deploy key, NOT ~/.ssh/id_rsa
+  control_repo_token:
+    file: ./github-token.txt
+```
+
+Steward reads credentials from `/run/secrets/` at runtime. Benefits:
+- Keys never traverse the container filesystem (tmpfs mount, not copied).
+- No access to `~/.ssh/` required — users generate a dedicated deploy key.
+- Docker restricts secret file visibility to the specific service.
+
+---
+
+#### 6.2.2 Per-repo credential references (credential indirection)
+
+**Industry standard:** ArgoCD repository credentials stored as named secrets, referenced by
+URL pattern. Flux CD `GitRepository` objects reference a `secretRef`.
+
+**Proposed solution:** Add a `credentials` section to the steward configuration (separate
+from app manifests) that maps URL patterns to credential sources:
+
+```yaml
+# credentials.yml (mounted into container, NOT committed to control repo)
+credentials:
+  - pattern: "github.com/org/*"
+    type: ssh
+    key_file: /run/secrets/github_deploy_key
+  - pattern: "gitlab.com/team/*"
+    type: token
+    token_file: /run/secrets/gitlab_token
+  - pattern: "*"
+    type: ssh
+    key_file: /run/secrets/default_key
+```
+
+Benefits:
+- App manifests contain only plain repo URLs (no embedded tokens).
+- Credentials never appear in the control repo.
+- Per-repo or per-org scoping enables least-privilege.
+- Credential rotation requires only replacing the secret file and restarting steward.
+
+---
+
+#### 6.2.3 SSH agent socket forwarding (opt-in alternative)
+
+**Industry standard:** Forward the host SSH agent socket into the container via bind-mount.
+
+```yaml
+volumes:
+  - ${SSH_AUTH_SOCK}:/run/ssh-agent:ro
+environment:
+  SSH_AUTH_SOCK: /run/ssh-agent
+```
+
+Benefits:
+- Private keys never leave the host's memory (agent holds them).
+- No keys on the container filesystem at all.
+- Key rotation is transparent (reload agent on host).
+
+Drawbacks:
+- Requires the host to run `ssh-agent` (not always the case for headless servers).
+- If the container is compromised, the attacker can use the agent to authenticate (but cannot
+  extract the keys themselves — mitigated by agent key confirmation or timeout).
+- Less suitable for unattended/headless homelab nodes without user sessions.
+
+---
+
+#### 6.2.4 Git credential helper integration
+
+**Industry standard:** Git's built-in credential helper system (`git credential fill`).
+
+**Proposed solution:** Instead of embedding tokens in URLs, configure git inside the container
+to use a credential helper that reads from a secret file:
+
+```
+[credential "https://github.com"]
+    helper = !f() { echo "username=oauth2"; echo "password=$(cat /run/secrets/github_token)"; }; f
+```
+
+Benefits:
+- Tokens are never part of the URL (no risk of log/metric leakage).
+- Works with any HTTPS git remote without URL modification.
+- Compatible with the Docker secrets approach (6.2.1).
+
+---
+
+### 6.3 Recommendations (based on established standards)
+
+| # | Recommendation | Precedent |
+|---|---|---|
+| 1 | **Use dedicated deploy keys** — never mount `~/.ssh/`. Generate a purpose-specific ed25519 key per repo or org. | GitHub Deploy Keys, GitLab Deploy Keys, Flux CD guidance |
+| 2 | **Store credentials as Docker Compose secrets** — mount via `/run/secrets/`, not environment variables or bind-mounted directories. | Docker security best practices, 12-factor app secrets guidance |
+| 3 | **Never embed tokens in URLs committed to git** — use credential indirection (file reference or credential helper). | ArgoCD repository credentials, OWASP secret management |
+| 4 | **Support per-repo credential scoping** — map URL patterns to credential sources for least-privilege access. | ArgoCD credential templates, Flux CD `secretRef` |
+| 5 | **Strip credentials from all output paths** — extend `strip_url_credentials()` coverage to git command error messages and debug logs. | General security hygiene |
+| 6 | **Document a migration path** — the current `~/.ssh` bind-mount approach must remain supported (deprecated) for backward compatibility, but new documentation should guide users to the secure path. | Flux CD v1→v2 migration |
+
+---
+
+### 6.4 Decisions to be made
+
+| # | Decision | Options | Consideration |
+|---|---|---|---|
+| 1 | **Primary credential mechanism** | (a) Docker secrets only, (b) Docker secrets + SSH agent, (c) All three (secrets, agent, legacy bind-mount) | UX simplicity vs flexibility. Option (c) is most compatible but increases attack surface and documentation complexity. |
+| 2 | **Credential config format** | (a) Separate `credentials.yml` file, (b) Environment variables pointing to secret files, (c) Inline in docker-compose env | (a) is most expressive; (b) is simpler for single-repo setups. |
+| 3 | **Per-app vs global credentials** | (a) Single credential set for all repos, (b) Per-URL-pattern matching, (c) Per-app `credential_ref` in manifest | (b) balances flexibility and simplicity. (c) couples credential info to manifest. |
+| 4 | **Deprecation timeline for `~/.ssh` bind-mount** | (a) Deprecate immediately, remove in next major, (b) Keep indefinitely as fallback, (c) Warn but never remove | Must consider existing users. (b) is safest for adoption. |
+| 5 | **Scope boundary with secrets management** | Should steward integrate with external secret stores (Vault, SOPS, 1Password CLI)? Or is that a layer above steward? | Current non-goal says "steward is not a secrets operator" — credential handling is distinct from app-secret injection. Credential access is in scope; app secrets remain out of scope. |
+| 6 | **Token leakage in error paths** | Audit all git error logging paths for credential exposure. Is `strip_url_credentials()` sufficient or do we need a global sanitizer? | Low effort, high impact. Should be addressed regardless of other decisions. |
+
+---
+
+### 6.5 Implementation phases
+
+**Phase 1 (low effort, high impact):**
+- Audit and sanitize all log/error paths for credential leakage.
+- Document "dedicated deploy key" as the recommended approach (over mounting `~/.ssh/`).
+- Support reading SSH key from `/run/secrets/git_ssh_key` as an alternative to bind-mount.
+- Support reading HTTPS token from `/run/secrets/control_repo_token` (fallback if
+  `CONTROL_REPO_URL` has no embedded token).
+
+**Phase 2 (medium effort):**
+- Implement `credentials.yml` for per-repo credential mapping.
+- Add `GIT_SSH_COMMAND` configuration to point at specific key files per-repo.
+- Add SSH agent socket forwarding as documented opt-in.
+- Deprecation warnings when legacy `~/.ssh` bind-mount is detected.
+
+**Phase 3 (longer term):**
+- Consider integration hooks for external secret managers (Vault agent sidecar, 1Password CLI).
+- Credential rotation detection (watch secret files for changes, re-init git config).
+
+**Complexity:** Phase 1 is Low, Phase 2 is Medium, Phase 3 is Medium-High.
+
+**Depends on:** None (can be implemented independently of other goals).
+
+---
+
 ## Non-goals
 
 These ArgoCD concepts are deliberately out of scope for steward's design. They are listed here
@@ -874,5 +1089,7 @@ to prevent scope creep and to document the reasoning.
   are provided by the Prometheus + Grafana layer, not by steward itself.
 - **UI / web dashboard** — Grafana dashboards cover the observability need. A TUI (`steward
   status`) is acceptable; a web UI is not in scope.
-- **Secrets management** — env files on the node filesystem are the secret boundary. Integration
-  with Vault, SOPS, or similar is out of scope; steward is not a secrets operator.
+- **Application secrets management** — env files on the node filesystem are the secret boundary
+  for application-level secrets (database passwords, API keys for apps). Integration with Vault,
+  SOPS, or similar for *app secrets* is out of scope; steward is not a secrets operator.
+  Note: *git credential handling* (SSH keys, tokens for repo access) is in scope — see Goal 6.
