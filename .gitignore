@@ -1,4 +1,5 @@
 .env
+docker-compose.override.yml
 
 # Python/cache artifacts
 __pycache__/

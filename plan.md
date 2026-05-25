@@ -1121,6 +1121,137 @@ Also add `steward_manifest_parse_errors_total` to the Grafana alert summary tabl
 
 ---
 
+## Goal 8 — New-node setup UX
+
+### Problem
+
+Getting steward running on a new node requires a user to:
+- Read the full quick-start section across multiple subsections
+- Manually create 2–3 files (`.env`, `docker-compose.override.yml`, optionally `credentials.yml`) from scattered examples in the README
+- Make a branching decision (single-key vs multi-key) without clear guidance on which is right for their case
+- Know that `AGENT_IMAGE` in `.env` is a testing escape hatch, not the normal update mechanism
+
+This is more friction than necessary for what should be a 5-minute operation.
+
+### Design decisions
+
+- **Single deploy key per node is the default and recommended path** — one key with access to all repos on that node; principle of least privilege.
+- **Multi-key (`credentials.yml`) is supported** but clearly a secondary option for users with keys across multiple git hosts.
+- **`AGENT_IMAGE` is absent from all user-facing templates** — it is a testing escape hatch for image overrides during development, not a user concern; Dependabot manages the version in `docker-compose.yml`.
+- **Templates are non-opinionated about paths** — example files use placeholder paths (`/home/you/.ssh/…`) so users fill in their own; no baked-in assumptions about where keys live.
+- **Templates are committed; generated files are not** — `.env.example` and `docker-compose.override.yml.example` live in the repo as reference; `.env` and `docker-compose.override.yml` are gitignored on the deployment host.
+
+---
+
+### Phase 1 — Templates and documentation (first)
+
+**Scope:** No scripts. Two new template files and a streamlined README quick-start. Goal: a user can get from zero to `docker compose up -d` by following a single linear path.
+
+#### 1a. `.env.example`
+
+New file at repo root. All user-facing variables with inline comments. Required values clearly marked; optional values commented out with defaults shown. Excludes `AGENT_IMAGE`.
+
+```
+# Required
+CONTROL_REPO_URL=git@github.com:you/homelab-gitops.git
+GITOPS_NODE_NAME=node1.lan
+STEWARD_DATA_DIR=/opt/steward-data
+
+# Recommended — set to your host user to avoid root-owned files in STEWARD_DATA_DIR
+# STEWARD_UID=1000
+# STEWARD_GID=1000
+
+# Optional
+# CONTROL_REPO_BRANCH=main
+# LOGLEVEL=INFO
+# METRICS_PORT=
+```
+
+#### 1b. `docker-compose.override.yml.example`
+
+New file at repo root. Single-key variant uncommented (default); multi-key variant commented out below with a clear separator. User copies the file, removes the `.example` suffix, and edits paths.
+
+Single-key section:
+```yaml
+services:
+  steward:
+    secrets:
+      - ssh_key
+      - ssh_known_hosts   # optional
+
+secrets:
+  ssh_key:
+    file: /home/you/.ssh/steward_deploy_key
+  ssh_known_hosts:
+    file: /home/you/.ssh/known_hosts   # optional
+```
+
+Multi-key section (commented out):
+```yaml
+# --- Multi-key setup (multiple git hosts) ---
+# Uncomment the block below and comment out the single-key block above.
+# Also create /etc/steward/credentials.yml — see README §5.
+#
+# services:
+#   steward:
+#     volumes:
+#       - /etc/steward/credentials.yml:/app/credentials.yml:ro
+#     secrets:
+#       - github_key
+#       - gitlab_key
+#       - ssh_known_hosts   # optional
+#
+# secrets:
+#   github_key:
+#     file: /home/you/.ssh/github_deploy_key
+#   gitlab_key:
+#     file: /home/you/.ssh/gitlab_deploy_key
+#   ssh_known_hosts:
+#     file: /home/you/.ssh/known_hosts
+```
+
+#### 1c. README.md quick-start streamline
+
+Replace current steps 3–5 (scattered .env instructions + single-key + multi-key subsections) with a single linear flow:
+
+1. `cp .env.example .env` → fill in 3 required values
+2. `echo "STEWARD_UID=$(id -u)" >> .env && echo "STEWARD_GID=$(id -g)" >> .env`
+3. Generate deploy key: `ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"`
+4. Add public key to GitHub/GitLab as deploy key
+5. `cp docker-compose.override.yml.example docker-compose.override.yml` → update key path
+6. `docker compose up -d`
+
+Keep multi-key and credentials.yml content but demote it to a separate "Advanced: multiple git hosts" subsection rather than an equal-weight option alongside single-key.
+
+---
+
+### Phase 2 — Interactive setup script (later)
+
+**Scope:** `setup.sh` — a POSIX sh script that automates Phase 1 steps.
+
+- Prompts for `CONTROL_REPO_URL`, `GITOPS_NODE_NAME`, `STEWARD_DATA_DIR`
+- Auto-detects `STEWARD_UID`/`STEWARD_GID`
+- Writes `.env` (aborts if already exists)
+- Asks: "Single deploy key (recommended) or multiple keys? [1/2]"
+- **Single-key path:** offers to generate key; writes `docker-compose.override.yml`; prints public key; waits for confirmation
+- **Multi-key path:** prompts for N host/key pairs; writes `credentials.yml` and `docker-compose.override.yml`
+- Asks: "Start steward now? [Y/n]"; if yes: `docker compose up -d`
+- POSIX sh only, no external dependencies beyond `ssh-keygen` and `docker`
+- Non-destructive: never overwrites existing `.env` or `docker-compose.override.yml`
+
+Depends on: Phase 1 complete (script uses same templates as reference).
+
+---
+
+### Status
+
+- [x] Phase 1a — `.env.example`
+- [x] Phase 1b — `docker-compose.override.yml.example`
+- [x] Phase 1c — README quick-start streamline
+- [ ] Phase 2 — `setup.sh`
+
+---
+
 ## Non-goals
 
 These ArgoCD concepts are deliberately out of scope for steward's design. They are listed here

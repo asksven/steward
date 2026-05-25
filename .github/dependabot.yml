@@ -6,6 +6,12 @@ updates:
       interval: "daily"
     labels:
       - "dependencies"
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    labels:
+      - "dependencies"
   - package-ecosystem: "pip"
     directory: "/"
     schedule:

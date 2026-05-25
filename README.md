@@ -56,61 +56,69 @@ See the [Releasing](#releasing) section for what image tags are produced and whi
 
 See the companion **homelab-gitops** README for the control repo structure. Create a directory for your node under `nodes/` and add app manifests.
 
-### 3. Create the .env file
+### 3. Create the `.env` file
 
-Create a `.env` file next to `docker-compose.yml`:
+Copy the example and fill in your values:
 
-```env
-CONTROL_REPO_URL=git@github.com:you/homelab-gitops.git
-GITOPS_NODE_NAME=node1.lan
-AGENT_IMAGE=ghcr.io/<you>/steward:latest
-STEWARD_DATA_DIR=/opt/steward-data
+```bash
+cp .env.example .env
 ```
 
-`GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo.
+Open `.env` and set the three required values:
 
-> **Note:** SSH (`git@host:path` or `ssh://host/path`) and plain HTTPS are supported.
-> HTTPS URLs with embedded credentials are **not** supported.
+| Variable | What to put here |
+|---|---|
+| `CONTROL_REPO_URL` | SSH (or plain HTTPS) URL of your control repo |
+| `GITOPS_NODE_NAME` | Name of the directory under `nodes/` in your control repo |
+| `STEWARD_DATA_DIR` | Host path where steward stores cloned repos and state (e.g. `/opt/steward-data`) |
 
-### 4. Run as a non-root user (recommended)
-
-By default steward runs as root, which means files written to `STEWARD_DATA_DIR` are owned by root. Add your host UID and GID so the files are owned by your normal user:
+Then add your host UID/GID so files in `STEWARD_DATA_DIR` are not root-owned:
 
 ```bash
 echo "STEWARD_UID=$(id -u)" >> .env
 echo "STEWARD_GID=$(id -g)" >> .env
 ```
 
-The entrypoint creates `/home/steward` inside the container owned by that UID. SSH key files are placed there automatically (see step 5).
+> **Note:** SSH (`git@host:path` or `ssh://host/path`) and plain HTTPS are supported.
+> HTTPS URLs with embedded credentials are **not** supported.
 
-### 5. Set up SSH authentication
+### 4. Generate a deploy key
 
-Steward **only supports SSH** for git operations. All repo URLs must use SSH format (`git@github.com:...` or `ssh://...`).
-
-#### Single key (one git host)
-
-The SSH key is delivered via Docker Compose secrets. Set the path to your deploy key in `.env`:
-
-```env
-SSH_KEY_FILE=/home/you/.ssh/id_ed25519
-SSH_KNOWN_HOSTS_FILE=/home/you/.ssh/known_hosts
-```
-
-The entrypoint reads the key from `/run/secrets/ssh_key` at startup and configures SSH automatically. No manual volume mounts are needed.
-
-To generate a dedicated deploy key:
+Generate a dedicated SSH key for steward (do not reuse `~/.ssh/id_ed25519`):
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
 ```
 
-Then add the public key as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
+Add `~/.ssh/steward_deploy_key.pub` as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
 
-#### Multiple keys (e.g. GitHub + GitLab)
+### 5. Create `docker-compose.override.yml`
 
-For setups with keys across multiple git hosts, create a `credentials.yml` file on the host and mount it into the container. This file maps host patterns to the Docker secret that holds each key.
+Copy the example and update the key path:
 
-**1. Create `credentials.yml`** (e.g. `/etc/steward/credentials.yml`):
+```bash
+cp docker-compose.override.yml.example docker-compose.override.yml
+```
+
+Edit `docker-compose.override.yml` and replace `/home/you/.ssh/steward_deploy_key` with the actual path to your key. The file is gitignored — it lives only on this host.
+
+For setups with keys across multiple git hosts (e.g. GitHub + GitLab), see [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys) below.
+
+### 6. Start the agent
+
+```bash
+docker compose up -d
+```
+
+The agent reconciles immediately on startup, then runs on the cron schedule.
+
+---
+
+## Advanced: multiple deploy keys
+
+If your control repo and app repos are on different git hosts and need separate keys, use `credentials.yml` to map each host to its secret.
+
+**1. Create `credentials.yml`** on the host (e.g. `/etc/steward/credentials.yml`):
 
 ```yaml
 credentials:
@@ -121,52 +129,9 @@ credentials:
 known_hosts_file: /run/secrets/ssh_known_hosts   # optional
 ```
 
-**2. Create `docker-compose.override.yml`** next to `docker-compose.yml` to add the secrets and volume mount. Keep this file off the repo — it contains host-specific paths:
-
-```yaml
-services:
-  steward:
-    volumes:
-      - /etc/steward/credentials.yml:/app/credentials.yml:ro
-    secrets:
-      - github_key
-      - gitlab_key
-      - ssh_known_hosts   # optional
-
-secrets:
-  github_key:
-    file: /home/you/.ssh/github_deploy_key
-  gitlab_key:
-    file: /home/you/.ssh/gitlab_deploy_key
-  ssh_known_hosts:
-    file: /home/you/.ssh/known_hosts
-```
+**2. Edit `docker-compose.override.yml`** — uncomment Option B in the file (or use the commented block in `docker-compose.override.yml.example` as reference).
 
 When `credentials.yml` is present, steward uses it and ignores the single-key `ssh_key` secret.
-
-#### Migrating from the legacy `~/.ssh-host` bind-mount
-
-> **Breaking change in 0.3.0:** If the `/root/.ssh-host` directory is mounted, steward will **exit with an error** on startup. The old bind-mount path has been removed. You must migrate before upgrading.
-
-**Migration steps:**
-
-1. Generate a dedicated deploy key per git host (do not reuse `~/.ssh/id_rsa` or `id_ed25519`):
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy_key -N "" -C "steward@$(hostname)"
-   ssh-keygen -t ed25519 -f ~/.ssh/gitlab_deploy_key -N "" -C "steward@$(hostname)"
-   ```
-2. Add each public key as a deploy key in GitHub/GitLab.
-3. Create `/etc/steward/credentials.yml` as shown in the multi-key section above.
-4. Create (or update) `docker-compose.override.yml`: add the `credentials.yml` volume mount and the new secrets (as shown in step 2 above). Do not edit `docker-compose.yml` directly — it is managed by the repo.
-5. Restart the container — the deprecation warning will be gone.
-
-### 6. Start the agent
-
-```bash
-docker compose up -d
-```
-
-The agent reconciles immediately on startup, then runs on the cron schedule.
 
 ---
 
@@ -455,6 +420,24 @@ When a notification URL is configured (`notify_url` per app, or global `STEWARD_
 - `drift_detected` (including manual mode OutOfSync)
 
 Notifications are intentionally **not de-duplicated**. If a bad state persists, a notification is sent on each reconcile cycle.
+
+---
+
+## Migration (0.3.0 — SSH secrets replace bind-mount)
+
+> **Breaking change in 0.3.0:** If the `/root/.ssh-host` directory is mounted, steward will **exit with an error** on startup. The old bind-mount path has been removed. You must migrate before upgrading.
+
+**Migration steps:**
+
+1. Generate a dedicated deploy key per git host (do not reuse `~/.ssh/id_rsa` or `id_ed25519`):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy_key -N "" -C "steward@$(hostname)"
+   ssh-keygen -t ed25519 -f ~/.ssh/gitlab_deploy_key -N "" -C "steward@$(hostname)"
+   ```
+2. Add each public key as a deploy key in GitHub/GitLab.
+3. Create `/etc/steward/credentials.yml` as shown in [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys).
+4. Create (or update) `docker-compose.override.yml` using `docker-compose.override.yml.example` as a starting point — uncomment Option B and update the key paths. Do not edit `docker-compose.yml` directly.
+5. Restart the container.
 
 ---
 
