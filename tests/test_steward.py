@@ -134,11 +134,18 @@ def test_parse_manifest_rejects_invalid_sync_policy(tmp_path: Path) -> None:
         steward.parse_manifest(manifest_file)
 
 
-def test_parse_manifest_rejects_https_repo_url(tmp_path: Path) -> None:
+def test_parse_manifest_accepts_plain_https_repo_url(tmp_path: Path) -> None:
     manifest = _sample_manifest(repo="https://github.com/you/repo.git")
     manifest_file = _write_manifest(tmp_path, _to_yaml(manifest))
+    result = steward.parse_manifest(manifest_file)
+    assert result.repo == "https://github.com/you/repo.git"
 
-    with pytest.raises(ValueError, match="only SSH URLs are supported"):
+
+def test_parse_manifest_rejects_https_repo_url_with_credentials(tmp_path: Path) -> None:
+    manifest = _sample_manifest(repo="https://oauth2:token@github.com/you/repo.git")
+    manifest_file = _write_manifest(tmp_path, _to_yaml(manifest))
+
+    with pytest.raises(ValueError, match="embedded credentials"):
         steward.parse_manifest(manifest_file)
 
 
@@ -159,10 +166,15 @@ def test_validate_repo_url_returns_none_for_ssh() -> None:
     assert steward.validate_repo_url("ssh://git@github.com/org/repo.git") is None
 
 
-def test_validate_repo_url_returns_error_for_https() -> None:
-    err = steward.validate_repo_url("https://github.com/org/repo.git")
+def test_validate_repo_url_returns_none_for_plain_https() -> None:
+    assert steward.validate_repo_url("https://github.com/org/repo.git") is None
+    assert steward.validate_repo_url("http://github.com/org/repo.git") is None
+
+
+def test_validate_repo_url_rejects_https_with_credentials() -> None:
+    err = steward.validate_repo_url("https://oauth2:token@github.com/org/repo.git")
     assert err is not None
-    assert "only SSH URLs are supported" in err
+    assert "embedded credentials" in err
 
 
 def test_strip_url_credentials_removes_userinfo() -> None:

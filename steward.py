@@ -158,16 +158,23 @@ def is_ssh_url(url: str) -> bool:
 
 
 def validate_repo_url(url: str, context: str = "repo") -> Optional[str]:
-    """Validate that a repo URL uses SSH. Returns error message or None if valid."""
+    """Validate a repo URL. SSH and plain HTTPS are accepted; HTTPS with embedded credentials is not."""
     if not url:
         return f"{context}: URL is empty"
-    if not is_ssh_url(url):
-        return (
-            f"{context}: only SSH URLs are supported "
-            f"(git@host:path or ssh://host/path). "
-            f"Got: {strip_url_credentials(url)}"
-        )
-    return None
+    if is_ssh_url(url):
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme in ("http", "https"):
+        if parsed.username or parsed.password:
+            return (
+                f"{context}: HTTPS URLs with embedded credentials are not supported. "
+                f"Use SSH (git@host:path) for private repos, or plain HTTPS for public repos."
+            )
+        return None
+    return (
+        f"{context}: unsupported URL scheme '{parsed.scheme}'. "
+        f"Use SSH (git@host:path or ssh://host/path) or plain HTTPS for public repos."
+    )
 
 
 def _load_metrics_state() -> dict:

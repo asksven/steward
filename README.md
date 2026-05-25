@@ -69,8 +69,8 @@ STEWARD_DATA_DIR=/opt/steward-data
 
 `GITOPS_NODE_NAME` must match the directory name under `nodes/` in the control repo.
 
-> **Note:** Only SSH URLs are supported (`git@host:path` or `ssh://host/path`).
-> HTTPS URLs with embedded tokens are **not** supported.
+> **Note:** SSH (`git@host:path` or `ssh://host/path`) and plain HTTPS are supported.
+> HTTPS URLs with embedded credentials are **not** supported.
 
 ### 4. Run as a non-root user (recommended)
 
@@ -121,7 +121,7 @@ credentials:
 known_hosts_file: /run/secrets/ssh_known_hosts   # optional
 ```
 
-**2. Update `docker-compose.yml`** to add secrets and mount the credentials file:
+**2. Create `docker-compose.override.yml`** next to `docker-compose.yml` to add the secrets and volume mount. Keep this file off the repo — it contains host-specific paths:
 
 ```yaml
 services:
@@ -157,7 +157,7 @@ When `credentials.yml` is present, steward uses it and ignores the single-key `s
    ```
 2. Add each public key as a deploy key in GitHub/GitLab.
 3. Create `/etc/steward/credentials.yml` as shown in the multi-key section above.
-4. Update `docker-compose.yml`: remove the `~/.ssh:/root/.ssh-host:ro` volume, add the `credentials.yml` mount and the new secrets.
+4. Create (or update) `docker-compose.override.yml`: add the `credentials.yml` volume mount and the new secrets (as shown in step 2 above). Do not edit `docker-compose.yml` directly — it is managed by the repo.
 5. Restart the container — the deprecation warning will be gone.
 
 ### 6. Start the agent
@@ -223,7 +223,7 @@ Each `.yml` file in `nodes/<hostname>/` in the control repo describes one applic
 ```yaml
 version: 2                              # required, supported: 1, 2
 name: arr                               # required, used as local repo directory name
-repo: git@github.com:you/arr-stack.git  # required, SSH URL only
+repo: git@github.com:you/arr-stack.git  # required, SSH or plain HTTPS
 ref:
   branch: main                          # mutually exclusive with tag
   # tag: v1.2.3                         # pin to a specific release
@@ -321,7 +321,7 @@ Add a manifest for steward itself in the control repo under `nodes/<hostname>/`:
 ```yaml
 version: 1
 name: steward
-repo: git@github.com:<you>/steward.git
+repo: https://github.com/asksven/steward
 ref:
   branch: main
 path: .
