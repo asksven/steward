@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v6
 
       - name: Install lint dependencies
         run: |
@@ -40,6 +40,9 @@ jobs:
           dockerfile: Dockerfile
           config: .hadolint.yaml
 
+      - name: Run actionlint
+        uses: raven-actions/actionlint@v2
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -52,7 +55,7 @@ jobs:
           python-version: '3.12'
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@v6
 
       - name: Install test dependencies
         run: |
