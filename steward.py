@@ -7,6 +7,7 @@ Watches a control repo for app manifests and reconciles docker compose stacks.
 import json
 import logging
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -24,6 +25,8 @@ from git import GitCommandError, InvalidGitRepositoryError, Repo
 
 from state_store import load_state as load_sqlite_state
 from state_store import save_state as save_sqlite_state
+
+_EMBEDDED_CREDENTIALS_RE = re.compile(r'(https?://)([^:@\s]+:[^@\s]+@)')
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -125,7 +128,11 @@ def log_mounts() -> None:
 # ---------------------------------------------------------------------------
 
 def strip_url_credentials(url: str) -> str:
-    """Remove embedded credentials from a repo URL, safe for use as a metric label."""
+    """Remove embedded credentials from a URL or any string containing HTTPS URLs.
+
+    Handles both pure URLs (e.g. metric labels) and arbitrary strings such as
+    GitCommandError messages where credentials may appear inside a longer text.
+    """
     try:
         p = urlparse(url)
         if p.scheme in ("http", "https") and p.username:
@@ -133,7 +140,8 @@ def strip_url_credentials(url: str) -> str:
             return urlunparse(p._replace(netloc=netloc))
     except Exception:
         pass
-    return url
+    # Fallback: strip user:pass@ from any HTTPS URL embedded in a longer string
+    return _EMBEDDED_CREDENTIALS_RE.sub(r'\1', url)
 
 
 def is_ssh_url(url: str) -> bool:
@@ -221,6 +229,95 @@ LEGACY_NOTICE_MARKER_FILE = GITOPS_ROOT / "metrics" / ".legacy_json_ignored"
 SUPPORTED_VERSIONS = {1, 2}
 SUPPORTED_SYNC_POLICIES = {"auto", "manual"}
 SUPPORTED_PULL_POLICIES = {"always", "missing", "never"}
+
+# ---------------------------------------------------------------------------
+# Credential configuration (credentials.yml)
+# ---------------------------------------------------------------------------
+
+STEWARD_CREDENTIALS_FILE = os.environ.get("STEWARD_CREDENTIALS_FILE", "/app/credentials.yml")
+
+
+@dataclass
+class CredentialEntry:
+    pattern: str      # glob pattern matched against the git host (e.g. "github.com", "*.internal")
+    key_file: str     # path to the SSH private key file (e.g. /run/secrets/github_key)
+
+
+@dataclass
+class CredentialsConfig:
+    credentials: list[CredentialEntry]
+    known_hosts_file: Optional[str] = None   # optional path to a known_hosts file
+
+
+def parse_credentials_file(path: str) -> CredentialsConfig:
+    """Parse and validate a credentials.yml file.
+
+    Returns a CredentialsConfig. Raises ValueError on schema problems.
+    Key files are not required to exist at parse time so this is testable without
+    real files on disk; entrypoint logic validates existence separately.
+    """
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+
+    if not isinstance(raw, dict):
+        raise ValueError("credentials.yml must be a YAML mapping")
+
+    entries_raw = raw.get("credentials")
+    if not isinstance(entries_raw, list):
+        raise ValueError("credentials.yml must have a 'credentials' list")
+
+    entries: list[CredentialEntry] = []
+    for i, item in enumerate(entries_raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"credentials[{i}] must be a mapping")
+        pattern = item.get("pattern")
+        key_file = item.get("key_file")
+        if not pattern or not isinstance(pattern, str):
+            raise ValueError(f"credentials[{i}]: 'pattern' is required and must be a string")
+        if not key_file or not isinstance(key_file, str):
+            raise ValueError(f"credentials[{i}]: 'key_file' is required and must be a string")
+        # Warn about path-component patterns — SSH Host matching is hostname-only
+        if "/" in pattern and pattern != "*":
+            log.warning(
+                "credentials[%d]: pattern '%s' contains path components; "
+                "SSH Host matching uses hostname only — consider using just '%s'",
+                i, pattern, pattern.split("/")[0],
+            )
+        entries.append(CredentialEntry(pattern=pattern, key_file=key_file))
+
+    known_hosts_file = raw.get("known_hosts_file")
+    if known_hosts_file is not None and not isinstance(known_hosts_file, str):
+        raise ValueError("credentials.yml: 'known_hosts_file' must be a string path")
+
+    return CredentialsConfig(credentials=entries, known_hosts_file=known_hosts_file or None)
+
+
+def generate_ssh_config(config: CredentialsConfig, strict_host_key_checking: str = "accept-new") -> str:
+    """Generate the text content of an ~/.ssh/config file from a CredentialsConfig.
+
+    Each credential entry produces one Host block. A trailing global Host * block
+    sets UserKnownHostsFile if known_hosts_file is provided.
+    """
+    lines: list[str] = []
+    for entry in config.credentials:
+        # Extract hostname from pattern for the SSH Host directive.
+        # Path-component parts (e.g. "github.com/org") are dropped; Host matching
+        # operates on the hostname only. A warning is already emitted at parse time.
+        host_part = entry.pattern.split("/")[0]
+        lines.append(f"Host {host_part}")
+        lines.append(f"  IdentityFile {entry.key_file}")
+        lines.append("  IdentitiesOnly yes")
+        lines.append(f"  StrictHostKeyChecking {strict_host_key_checking}")
+        lines.append("")
+
+    # Global fallback block
+    lines.append("Host *")
+    if config.known_hosts_file:
+        lines.append(f"  UserKnownHostsFile {config.known_hosts_file}")
+    lines.append(f"  StrictHostKeyChecking {strict_host_key_checking}")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 @dataclass
@@ -513,7 +610,7 @@ def ensure_repo(url: str, local_path: Path, branch: Optional[str] = None, tag: O
             import shutil
             shutil.rmtree(local_path)
 
-    log.info("Cloning %s → %s", url, local_path)
+    log.info("Cloning %s → %s", strip_url_credentials(url), local_path)
     local_path.parent.mkdir(parents=True, exist_ok=True)
     repo = Repo.clone_from(url, local_path)
     if tag:
@@ -529,7 +626,7 @@ def fetch_ref(repo: Repo, ref: AppRef) -> bool:
         repo.remotes.origin.fetch(tags=bool(ref.tag))
         return True
     except GitCommandError as e:
-        log.error("git fetch failed: %s", e)
+        log.error("git fetch failed: %s", strip_url_credentials(str(e)))
         return False
 
 
@@ -583,7 +680,7 @@ def apply_ref(repo: Repo, ref: AppRef) -> bool:
             repo.git.checkout(ref.tag)
         return True
     except GitCommandError as e:
-        log.error("git pull/checkout failed: %s", e)
+        log.error("git pull/checkout failed: %s", strip_url_credentials(str(e)))
         return False
 
 
@@ -1051,7 +1148,7 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
             tag=app.ref.tag,
         )
     except GitCommandError as e:
-        log.error("Failed to clone repo for app '%s': %s", app.name, e)
+        log.error("Failed to clone repo for app '%s': %s", app.name, strip_url_credentials(str(e)))
         app_state["sync_status"] = SyncStatus.UNKNOWN.value
         app_state["health_status"] = HEALTH_STATUS_UNKNOWN
         _inc(app_state, "reconcile_total", "failed")
@@ -1338,7 +1435,7 @@ def reconcile() -> int:
             branch=CONTROL_REPO_BRANCH,
         )
     except GitCommandError as e:
-        log.error("Failed to clone/open control repo: %s", e)
+        log.error("Failed to clone/open control repo: %s", strip_url_credentials(str(e)))
         _inc(state, "reconcile", "total", "fatal")
         state.setdefault("reconcile", {})["last_timestamp"] = time.time()
         _save_metrics_state(state)

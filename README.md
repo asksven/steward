@@ -89,6 +89,8 @@ The entrypoint creates `/home/steward` inside the container owned by that UID. S
 
 Steward **only supports SSH** for git operations. All repo URLs must use SSH format (`git@github.com:...` or `ssh://...`).
 
+#### Single key (one git host)
+
 The SSH key is delivered via Docker Compose secrets. Set the path to your deploy key in `.env`:
 
 ```env
@@ -104,7 +106,61 @@ To generate a dedicated deploy key:
 ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
 ```
 
-Then add the public key as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient).
+Then add the public key as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
+
+#### Multiple keys (e.g. GitHub + GitLab)
+
+For setups with keys across multiple git hosts, create a `credentials.yml` file on the host and mount it into the container. This file maps host patterns to the Docker secret that holds each key.
+
+**1. Create `credentials.yml`** (e.g. `/etc/steward/credentials.yml`):
+
+```yaml
+credentials:
+  - pattern: github.com
+    key_file: /run/secrets/github_key
+  - pattern: gitlab.com
+    key_file: /run/secrets/gitlab_key
+known_hosts_file: /run/secrets/ssh_known_hosts   # optional
+```
+
+**2. Update `docker-compose.yml`** to add secrets and mount the credentials file:
+
+```yaml
+services:
+  steward:
+    volumes:
+      - /etc/steward/credentials.yml:/app/credentials.yml:ro
+    secrets:
+      - github_key
+      - gitlab_key
+      - ssh_known_hosts   # optional
+
+secrets:
+  github_key:
+    file: /home/you/.ssh/github_deploy_key
+  gitlab_key:
+    file: /home/you/.ssh/gitlab_deploy_key
+  ssh_known_hosts:
+    file: /home/you/.ssh/known_hosts
+```
+
+When `credentials.yml` is present, steward uses it and ignores the single-key `ssh_key` secret.
+
+#### Migrating from the legacy `~/.ssh-host` bind-mount
+
+> **Breaking change in 0.3.0:** If the `/root/.ssh-host` directory is mounted, steward will **exit with an error** on startup. The old bind-mount path has been removed. You must migrate before upgrading.
+
+**Migration steps:**
+
+1. Generate a dedicated deploy key per git host (do not reuse `~/.ssh/id_rsa` or `id_ed25519`):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy_key -N "" -C "steward@$(hostname)"
+   ssh-keygen -t ed25519 -f ~/.ssh/gitlab_deploy_key -N "" -C "steward@$(hostname)"
+   ```
+2. Add each public key as a deploy key in GitHub/GitLab.
+3. Create `/etc/steward/credentials.yml` as shown in the multi-key section above.
+4. Update `docker-compose.yml`: remove the `~/.ssh:/root/.ssh-host:ro` volume, add the `credentials.yml` mount and the new secrets.
+5. Restart the container — the deprecation warning will be gone.
 
 ### 6. Start the agent
 
@@ -220,31 +276,7 @@ The entrypoint copies these into the container user's `~/.ssh/` with correct per
 
 ### Multiple hosts / keys
 
-If you need different keys for different hosts (e.g., GitHub and GitLab), create a `docker-compose.override.yml`:
-
-```yaml
-services:
-  steward:
-    volumes:
-      - ~/steward-ssh-config:/root/.ssh-host/config:ro
-      - ~/.ssh/id_rsa-gitlab:/root/.ssh-host/id_rsa-gitlab:ro
-      - ~/.ssh/id_rsa-github:/root/.ssh-host/id_rsa-github:ro
-      - ~/.ssh/known_hosts:/root/.ssh-host/known_hosts:ro
-```
-
-With a custom SSH config at `~/steward-ssh-config`:
-
-```
-Host gitlab.com
-  IdentityFile /home/steward/.ssh/id_rsa-gitlab
-  StrictHostKeyChecking yes
-
-Host github.com
-  IdentityFile /home/steward/.ssh/id_rsa-github
-  StrictHostKeyChecking yes
-```
-
-The entrypoint falls back to the `/root/.ssh-host/` bind-mount when no Docker secret is present.
+Use `credentials.yml` to map different deploy keys to different git hosts. See [Set up SSH authentication](#5-set-up-ssh-authentication) in the quick-start guide for the full setup.
 
 ### Use SSH URLs in manifests
 

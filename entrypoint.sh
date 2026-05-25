@@ -22,14 +22,45 @@ fi
 
 echo "steward starting"
 echo "  Node:         ${GITOPS_NODE_NAME:-$(hostname)}"
-echo "  Control repo: ${CONTROL_REPO_URL}"
+echo "  Control repo: $(echo "${CONTROL_REPO_URL}" | sed 's|://[^@]*@|://***@|g')"
 echo "  Gitops root:  ${GITOPS_ROOT:-/git}"
 echo "  Running as:   ${STEWARD_UID}:${STEWARD_GID}"
 echo "  Home:         ${STEWARD_HOME}"
 echo "  Metrics port: ${METRICS_PORT:-(disabled)}"
 
-# Set up SSH from Docker secrets (/run/secrets/ssh_key, /run/secrets/ssh_known_hosts)
-if [ -f /run/secrets/ssh_key ]; then
+# Set up SSH credentials
+# Priority:
+#   1. STEWARD_CREDENTIALS_FILE (credentials.yml) — multi-key, recommended
+#   2. /run/secrets/ssh_key                        — single Docker secret key
+STEWARD_CREDENTIALS_FILE="${STEWARD_CREDENTIALS_FILE:-/app/credentials.yml}"
+
+if [ -f "${STEWARD_CREDENTIALS_FILE}" ]; then
+  python3 - <<PYEOF
+import sys, os
+sys.path.insert(0, '/app')
+os.environ.setdefault('GITOPS_ROOT', '${GITOPS_ROOT:-/git}')
+import steward
+try:
+    cfg = steward.parse_credentials_file('${STEWARD_CREDENTIALS_FILE}')
+    # Validate key files exist
+    missing = [e.key_file for e in cfg.credentials if not __import__('os').path.isfile(e.key_file)]
+    if missing:
+        print(f"WARNING: credentials.yml references missing key files: {', '.join(missing)}", flush=True)
+    strict = 'yes' if cfg.known_hosts_file else 'accept-new'
+    ssh_config_text = steward.generate_ssh_config(cfg, strict_host_key_checking=strict)
+    ssh_dir = '${STEWARD_HOME}/.ssh'
+    __import__('os').makedirs(ssh_dir, exist_ok=True)
+    with open(f'{ssh_dir}/config', 'w') as f:
+        f.write(ssh_config_text)
+    __import__('os').chmod(f'{ssh_dir}/config', 0o600)
+    __import__('os').chmod(ssh_dir, 0o700)
+    print(f"SSH config written for {len(cfg.credentials)} credential entries from {repr('${STEWARD_CREDENTIALS_FILE}')}", flush=True)
+except Exception as exc:
+    print(f"ERROR: Failed to configure SSH from credentials.yml: {exc}", flush=True)
+    sys.exit(1)
+PYEOF
+  chown -R "${STEWARD_UID}:${STEWARD_GID}" "${STEWARD_HOME}/.ssh"
+elif [ -f /run/secrets/ssh_key ]; then
   mkdir -p "${STEWARD_HOME}/.ssh"
   cp /run/secrets/ssh_key "${STEWARD_HOME}/.ssh/id_ed25519"
   chmod 600 "${STEWARD_HOME}/.ssh/id_ed25519"
@@ -54,14 +85,10 @@ SSHCONF
   chmod 700 "${STEWARD_HOME}/.ssh"
   chown -R "${STEWARD_UID}:${STEWARD_GID}" "${STEWARD_HOME}/.ssh"
   echo "SSH key configured from Docker secret"
-elif [ -d /root/.ssh-host ] && ls /root/.ssh-host/* >/dev/null 2>&1; then
-  # Legacy fallback: copy from bind-mounted staging directory
-  mkdir -p "${STEWARD_HOME}/.ssh"
-  cp /root/.ssh-host/* "${STEWARD_HOME}/.ssh/"
-  chmod 700 "${STEWARD_HOME}/.ssh"
-  chmod 600 "${STEWARD_HOME}/.ssh/"*
-  chown -R "${STEWARD_UID}:${STEWARD_GID}" "${STEWARD_HOME}"
-  echo "SSH key configured from legacy .ssh-host mount (consider migrating to Docker secrets)"
+elif [ -d /root/.ssh-host ]; then
+  echo "ERROR: The /root/.ssh-host bind-mount is no longer supported (removed in steward 0.3.0)."
+  echo "  Migrate to credentials.yml: https://github.com/asksven/steward#migrating-from-the-legacy-ssh-host-bind-mount"
+  exit 1
 else
   echo "WARNING: No SSH key found. Git operations on private repos will fail."
   echo "  Configure SSH_KEY_FILE in .env or provide /run/secrets/ssh_key"

@@ -165,6 +165,226 @@ def test_validate_repo_url_returns_error_for_https() -> None:
     assert "only SSH URLs are supported" in err
 
 
+def test_strip_url_credentials_removes_userinfo() -> None:
+    assert steward.strip_url_credentials("https://oauth2:secret@github.com/org/repo") == "https://github.com/org/repo"
+    assert steward.strip_url_credentials("https://user:pass@gitlab.com/org/repo.git") == "https://gitlab.com/org/repo.git"
+
+
+def test_strip_url_credentials_preserves_ssh_url() -> None:
+    url = "git@github.com:org/repo.git"
+    assert steward.strip_url_credentials(url) == url
+
+
+# ---------------------------------------------------------------------------
+# credentials.yml — parse_credentials_file
+# ---------------------------------------------------------------------------
+
+def test_parse_credentials_file_valid(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - pattern: github.com\n"
+        "    key_file: /run/secrets/github_key\n"
+        "  - pattern: gitlab.com\n"
+        "    key_file: /run/secrets/gitlab_key\n"
+        "known_hosts_file: /run/secrets/ssh_known_hosts\n"
+    )
+
+    cfg = steward.parse_credentials_file(str(creds_file))
+
+    assert len(cfg.credentials) == 2
+    assert cfg.credentials[0].pattern == "github.com"
+    assert cfg.credentials[0].key_file == "/run/secrets/github_key"
+    assert cfg.credentials[1].pattern == "gitlab.com"
+    assert cfg.credentials[1].key_file == "/run/secrets/gitlab_key"
+    assert cfg.known_hosts_file == "/run/secrets/ssh_known_hosts"
+
+
+def test_parse_credentials_file_without_known_hosts(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - pattern: github.com\n"
+        "    key_file: /run/secrets/github_key\n"
+    )
+
+    cfg = steward.parse_credentials_file(str(creds_file))
+
+    assert cfg.known_hosts_file is None
+
+
+def test_parse_credentials_file_rejects_missing_pattern(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - key_file: /run/secrets/github_key\n"
+    )
+
+    with pytest.raises(ValueError, match="pattern"):
+        steward.parse_credentials_file(str(creds_file))
+
+
+def test_parse_credentials_file_rejects_missing_key_file(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - pattern: github.com\n"
+    )
+
+    with pytest.raises(ValueError, match="key_file"):
+        steward.parse_credentials_file(str(creds_file))
+
+
+def test_parse_credentials_file_rejects_non_list_credentials(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text("credentials: not-a-list\n")
+
+    with pytest.raises(ValueError, match="list"):
+        steward.parse_credentials_file(str(creds_file))
+
+
+def test_parse_credentials_file_warns_on_path_component_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - pattern: github.com/myorg\n"
+        "    key_file: /run/secrets/org_key\n"
+    )
+
+    warnings = []
+    monkeypatch.setattr(steward.log, "warning", lambda msg, *args: warnings.append(msg % args))
+
+    cfg = steward.parse_credentials_file(str(creds_file))
+
+    assert len(cfg.credentials) == 1
+    assert any("path components" in w for w in warnings)
+
+
+# ---------------------------------------------------------------------------
+# credentials.yml — generate_ssh_config
+# ---------------------------------------------------------------------------
+
+def test_generate_ssh_config_two_keys() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(pattern="github.com", key_file="/run/secrets/github_key"),
+            steward.CredentialEntry(pattern="gitlab.com", key_file="/run/secrets/gitlab_key"),
+        ]
+    )
+
+    text = steward.generate_ssh_config(cfg)
+
+    assert "Host github.com" in text
+    assert "IdentityFile /run/secrets/github_key" in text
+    assert "Host gitlab.com" in text
+    assert "IdentityFile /run/secrets/gitlab_key" in text
+    assert "IdentitiesOnly yes" in text
+
+
+def test_generate_ssh_config_with_known_hosts() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(pattern="github.com", key_file="/run/secrets/github_key"),
+        ],
+        known_hosts_file="/run/secrets/ssh_known_hosts",
+    )
+
+    text = steward.generate_ssh_config(cfg)
+
+    assert "UserKnownHostsFile /run/secrets/ssh_known_hosts" in text
+
+
+def test_generate_ssh_config_strict_host_key_checking_yes_when_known_hosts_set() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(pattern="github.com", key_file="/run/secrets/github_key"),
+        ],
+        known_hosts_file="/run/secrets/ssh_known_hosts",
+    )
+
+    text = steward.generate_ssh_config(cfg, strict_host_key_checking="yes")
+
+    assert "StrictHostKeyChecking yes" in text
+
+
+def test_generate_ssh_config_host_strips_path_components() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(pattern="github.com/myorg", key_file="/run/secrets/org_key"),
+        ]
+    )
+
+    text = steward.generate_ssh_config(cfg)
+
+    assert "Host github.com" in text
+    assert "Host github.com/myorg" not in text
+
+
+def test_generate_ssh_config_wildcard_fallback() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(pattern="*", key_file="/run/secrets/default_key"),
+        ]
+    )
+
+    text = steward.generate_ssh_config(cfg)
+
+    assert "Host *" in text
+    assert "IdentityFile /run/secrets/default_key" in text
+
+
+def test_fetch_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = MagicMock()
+    repo.remotes.origin.fetch.side_effect = GitCommandError(
+        "fetch", 128, stderr="fatal: repository 'https://oauth2:s3cr3t@github.com/org/repo.git' not found"
+    )
+
+    log_messages = []
+    monkeypatch.setattr(steward.log, "error", lambda msg, *args: log_messages.append(msg % args))
+
+    result = steward.fetch_ref(repo, steward.AppRef(branch="main"))
+
+    assert result is False
+    assert len(log_messages) > 0
+    assert all("s3cr3t" not in m for m in log_messages)
+
+
+def test_apply_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = MagicMock()
+    repo.remotes.origin.pull.side_effect = GitCommandError(
+        "pull", 128, stderr="ERROR: https://oauth2:t0ken@github.com/org/repo.git permission denied"
+    )
+
+    log_messages = []
+    monkeypatch.setattr(steward.log, "error", lambda msg, *args: log_messages.append(msg % args))
+
+    result = steward.apply_ref(repo, steward.AppRef(branch="main"))
+
+    assert result is False
+    assert len(log_messages) > 0
+    assert all("t0ken" not in m for m in log_messages)
+
+
+def test_ensure_repo_clone_log_sanitizes_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cloned_path = tmp_path / "repo"
+
+    log_messages = []
+    monkeypatch.setattr(steward.log, "info", lambda msg, *args: log_messages.append(msg % args))
+
+    fake_repo = MagicMock()
+    monkeypatch.setattr(steward.Repo, "clone_from", lambda url, path, **kwargs: fake_repo)
+
+    steward.ensure_repo(
+        url="https://oauth2:mysecret@github.com/org/repo.git",
+        local_path=cloned_path,
+    )
+
+    assert all("mysecret" not in m for m in log_messages)
+    assert any("github.com/org/repo.git" in m for m in log_messages)
+
+
 def test_parse_manifest_defaults_health_delay(tmp_path: Path) -> None:
     manifest_file = _write_manifest(tmp_path, _to_yaml(_sample_manifest()))
 
