@@ -1198,6 +1198,16 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
 
     if check.status == SyncStatus.SYNCED:
         drifted, drift_reason = _detect_live_drift(app, stack_path)
+        if drift_reason in ("expected_services_unavailable", "live_state_unavailable"):
+            log.warning(
+                "App '%s' live state cannot be determined (%s), reporting Unknown",
+                app.name,
+                drift_reason,
+            )
+            app_state["sync_status"] = SyncStatus.UNKNOWN.value
+            app_state["health_status"] = HEALTH_STATUS_UNKNOWN
+            _inc(app_state, "reconcile_total", "failed")
+            return False
         if drifted:
             app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
 

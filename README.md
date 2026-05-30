@@ -137,6 +137,8 @@ All configuration is via environment variables.
 
 Each `.yml` file in `nodes/<hostname>/` in the control repo describes one application.
 
+> **Paths in manifests are container-internal.** Steward mounts `STEWARD_DATA_DIR` (host) as `/git` inside the container. Stack repos are cloned to `/git/stacks/<name>/`. So if your `.env` is committed to the stack repo, the path is `/git/stacks/<name>/.env`. Do **not** use host paths like `/home/ubuntu/git/...` — those do not exist inside the steward container.
+
 ```yaml
 version: 2                              # required, supported: 1, 2
 name: arr                               # required, used as local repo directory name
@@ -146,7 +148,7 @@ ref:
   # tag: v1.2.3                         # pin to a specific release
 path: .                                 # path within repo to compose file, default: .
 compose_file: docker-compose.yml        # compose filename, default: docker-compose.yml
-compose_env_file: /git/envs/arr.env     # preferred in v2; replaces deprecated env_file
+compose_env_file: /git/stacks/arr/.env  # container-internal path; see note above
 sync_policy: auto                       # optional: auto (default) or manual
 pull_policy: always                     # optional: always (default), missing, never
 health_check_delay_seconds: 30          # optional: delay before compose health check

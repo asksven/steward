@@ -766,6 +766,7 @@ def test_reconcile_app_sets_synced_status_when_up_to_date(monkeypatch: pytest.Mo
             remote_sha="abc123",
         ),
     )
+    monkeypatch.setattr(steward, "_detect_live_drift", lambda _app, _stack: (False, "no_drift"))
     monkeypatch.setattr(steward, "_evaluate_health_status", lambda _app, _path, _state: "Healthy")
 
     result = steward.reconcile_app(app, state)
@@ -1036,6 +1037,84 @@ def test_reconcile_app_synced_drift_auto_self_heals(monkeypatch: pytest.MonkeyPa
     assert state["apps"]["demo"]["health_status"] == "Progressing"
     assert state["apps"]["demo"]["sync_total"]["success"] == 1
     assert state["_operations"][0]["trigger"] == "self_heal"
+
+
+def test_reconcile_app_synced_expected_services_unavailable_reports_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = steward.AppManifest(
+        version=2,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+        sync_policy="auto",
+    )
+
+    state: dict = {}
+    repo = MagicMock()
+
+    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: repo)
+    monkeypatch.setattr(steward, "fetch_ref", lambda _repo, _ref: True)
+    monkeypatch.setattr(
+        steward,
+        "check_app",
+        lambda _repo, _ref: steward.CheckResult(
+            status=steward.SyncStatus.SYNCED,
+            local_sha="abc123",
+            remote_sha="abc123",
+        ),
+    )
+    monkeypatch.setattr(
+        steward, "_detect_live_drift", lambda _app, _stack: (False, "expected_services_unavailable")
+    )
+
+    result = steward.reconcile_app(app, state)
+
+    assert result is False
+    assert state["apps"]["demo"]["sync_status"] == "Unknown"
+    assert state["apps"]["demo"]["health_status"] == "Unknown"
+    assert state["apps"]["demo"]["reconcile_total"]["failed"] == 1
+
+
+def test_reconcile_app_synced_live_state_unavailable_reports_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = steward.AppManifest(
+        version=2,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+        sync_policy="auto",
+    )
+
+    state: dict = {}
+    repo = MagicMock()
+
+    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: repo)
+    monkeypatch.setattr(steward, "fetch_ref", lambda _repo, _ref: True)
+    monkeypatch.setattr(
+        steward,
+        "check_app",
+        lambda _repo, _ref: steward.CheckResult(
+            status=steward.SyncStatus.SYNCED,
+            local_sha="abc123",
+            remote_sha="abc123",
+        ),
+    )
+    monkeypatch.setattr(steward, "_detect_live_drift", lambda _app, _stack: (False, "live_state_unavailable"))
+
+    result = steward.reconcile_app(app, state)
+
+    assert result is False
+    assert state["apps"]["demo"]["sync_status"] == "Unknown"
+    assert state["apps"]["demo"]["health_status"] == "Unknown"
+    assert state["apps"]["demo"]["reconcile_total"]["failed"] == 1
 
 
 def test_sync_failure_sends_notification(monkeypatch: pytest.MonkeyPatch) -> None:
