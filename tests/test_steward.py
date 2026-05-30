@@ -349,7 +349,7 @@ def test_generate_ssh_config_wildcard_fallback() -> None:
 
 def test_fetch_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = MagicMock()
-    repo.remotes.origin.fetch.side_effect = GitCommandError(
+    repo.git.fetch.side_effect = GitCommandError(
         "fetch", 128, stderr="fatal: repository 'https://oauth2:s3cr3t@github.com/org/repo.git' not found"
     )
 
@@ -365,7 +365,7 @@ def test_fetch_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_apply_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = MagicMock()
-    repo.remotes.origin.pull.side_effect = GitCommandError(
+    repo.git.pull.side_effect = GitCommandError(
         "pull", 128, stderr="ERROR: https://oauth2:t0ken@github.com/org/repo.git permission denied"
     )
 
@@ -453,7 +453,7 @@ def test_sync_repo_pulls_branch_when_remote_ahead(monkeypatch: pytest.MonkeyPatc
     result = steward.sync_repo(repo, steward.AppRef(branch="main"))
 
     assert result is True
-    repo.remotes.origin.pull.assert_called_once_with("main")
+    repo.git.pull.assert_called_once_with("origin", "main")
 
 
 def test_sync_repo_checks_out_tag_when_remote_ahead(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -471,7 +471,7 @@ def test_sync_repo_checks_out_tag_when_remote_ahead(monkeypatch: pytest.MonkeyPa
 def test_sync_repo_returns_none_when_pull_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = MagicMock()
     repo.head.commit.hexsha = "abc123"
-    repo.remotes.origin.pull.side_effect = GitCommandError("pull", 1, stderr="boom")
+    repo.git.pull.side_effect = GitCommandError("pull", 1, stderr="boom")
 
     monkeypatch.setattr(steward, "get_remote_sha", lambda _repo, _ref: "def456")
 
@@ -1309,11 +1309,11 @@ def test_write_status_snapshot_commits_only_when_changed(
 
     assert steward._write_status_snapshot(repo, state) is True
     assert repo.index.commit.call_count == 1
-    assert repo.remotes.origin.push.call_count == 1
+    assert repo.git.push.call_count == 1
 
     assert steward._write_status_snapshot(repo, state) is True
     assert repo.index.commit.call_count == 1
-    assert repo.remotes.origin.push.call_count == 1
+    assert repo.git.push.call_count == 1
 
     status_file = working_dir / "nodes" / "node-a" / "status.json"
     payload = json.loads(status_file.read_text())

@@ -19,23 +19,6 @@ On each node:
 
 ---
 
-## Repository structure
-
-```
-steward/
-  steward.py          # Main steward logic
-  Dockerfile             # Agent container image
-  docker-compose.yml     # Deploy the agent on a node
-  crontab                # Cron schedule (reconcile)
-  entrypoint.sh          # Container entrypoint
-  examples.yml           # Example app manifests
-  .github/
-    workflows/
-      build.yml          # Lint + test + build and push image to GHCR
-```
-
----
-
 ## Prerequisites
 
 - Docker with the `docker compose` plugin (v2) on each node
@@ -46,17 +29,11 @@ steward/
 
 ## Quick start
 
-### 1. Build and push the agent image
-
-Update `.github/workflows/build.yml` with your registry path (the `IMAGE_NAME` env var), then push to `main`. The workflow runs lint and tests first, then builds and pushes to GHCR only if both pass.
-
-See the [Releasing](#releasing) section for what image tags are produced and which one to use in your `.env`.
-
-### 2. Set up your control repo
+### 1. Set up your control repo
 
 See the companion **homelab-gitops** README for the control repo structure. Create a directory for your node under `nodes/` and add app manifests.
 
-### 3. Create the `.env` file
+### 2. Create the `.env` file
 
 Copy the example and fill in your values:
 
@@ -82,7 +59,7 @@ echo "STEWARD_GID=$(id -g)" >> .env
 > **Note:** SSH (`git@host:path` or `ssh://host/path`) and plain HTTPS are supported.
 > HTTPS URLs with embedded credentials are **not** supported.
 
-### 4. Generate a deploy key
+### 3. Generate a deploy key
 
 Generate a dedicated SSH key for steward (do not reuse `~/.ssh/id_ed25519`):
 
@@ -92,7 +69,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)
 
 Add `~/.ssh/steward_deploy_key.pub` as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
 
-### 5. Create `docker-compose.override.yml`
+### 4. Create `docker-compose.override.yml`
 
 Copy the example and update the key path:
 
@@ -104,7 +81,7 @@ Edit `docker-compose.override.yml` and replace `/home/you/.ssh/steward_deploy_ke
 
 For setups with keys across multiple git hosts (e.g. GitHub + GitLab), see [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys) below.
 
-### 6. Start the agent
+### 5. Start the agent
 
 ```bash
 docker compose up -d
@@ -135,30 +112,6 @@ When `credentials.yml` is present, steward uses it and ignores the single-key `s
 
 ---
 
-## Development and quality checks
-
-Steward uses **uv** for local dependency management and developer commands.
-
-```bash
-uv venv
-uv pip install -r requirements.txt pytest ruff
-uv run pytest -v --tb=short
-uv run ruff check steward.py metrics_server.py tests
-```
-
-Runtime dependencies are managed with:
-
-- `requirements.in` for direct dependencies
-- `requirements.txt` for pinned, reproducible installs
-
-To refresh pinned versions:
-
-```bash
-uv pip compile requirements.in -o requirements.txt
-```
-
----
-
 ## Configuration
 
 All configuration is via environment variables.
@@ -173,7 +126,6 @@ All configuration is via environment variables.
 | `GITOPS_ROOT` | no | `/git` | Repo root inside the container — change only if you remap the volume |
 | `GITOPS_NODE_NAME` | no | `hostname` | Node name, must match `nodes/<name>` in control repo |
 | `AGENT_CONTAINER_NAME` | no | `steward` | Container name — used by `docker inspect` for debug path logging and to detect when reconciling steward's own stack (self-update via helper container) |
-| `AGENT_IMAGE` | no | — | Overrides the image tag in `docker-compose.yml`; useful for testing a local build |
 | `LOGLEVEL` | no | `INFO` | Log level (`DEBUG` enables per-path inside/outside diagnostics) |
 | `METRICS_PORT` | no | — (disabled) | Port for the Prometheus `/metrics` scrape endpoint; unset to disable |
 | `STEWARD_NOTIFY_URL` | no | — (disabled) | Default webhook endpoint for failure/degraded/drift notifications |
@@ -246,7 +198,7 @@ The entrypoint reads `/run/secrets/ssh_key` at startup and configures SSH automa
 
 ### Multiple hosts / keys
 
-Use `credentials.yml` to map different deploy keys to different git hosts. See [Set up SSH authentication](#5-set-up-ssh-authentication) in the quick-start guide for the full setup.
+Use `credentials.yml` to map different deploy keys to different git hosts. See [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys) for the full setup.
 
 ### Use SSH URLs in manifests
 
@@ -293,16 +245,6 @@ path: .
 compose_file: docker-compose.yml
 enabled: true
 ```
-
-### Testing a local build
-
-To run a locally built image without changing `docker-compose.yml`, set `AGENT_IMAGE` in the `.env` file next to your deployment:
-
-```env
-AGENT_IMAGE=ghcr.io/<you>/steward:dev
-```
-
-This overrides the pinned tag for that node only and is not tracked by Dependabot.
 
 ---
 
@@ -423,106 +365,58 @@ Notifications are intentionally **not de-duplicated**. If a bad state persists, 
 
 ---
 
-## Migration (0.3.0 — SSH secrets replace bind-mount)
-
-> **Breaking change in 0.3.0:** If the `/root/.ssh-host` directory is mounted, steward will **exit with an error** on startup. The old bind-mount path has been removed. You must migrate before upgrading.
-
-**Migration steps:**
-
-1. Generate a dedicated deploy key per git host (do not reuse `~/.ssh/id_rsa` or `id_ed25519`):
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/github_deploy_key -N "" -C "steward@$(hostname)"
-   ssh-keygen -t ed25519 -f ~/.ssh/gitlab_deploy_key -N "" -C "steward@$(hostname)"
-   ```
-2. Add each public key as a deploy key in GitHub/GitLab.
-3. Create `/etc/steward/credentials.yml` as shown in [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys).
-4. Create (or update) `docker-compose.override.yml` using `docker-compose.override.yml.example` as a starting point — uncomment Option B and update the key paths. Do not edit `docker-compose.yml` directly.
-5. Restart the container.
-
 ---
 
-## Migration (pre-2.5 to 2.5+)
+## Developer guide
 
-Item 2.5 makes steward pass an explicit compose project name on all compose runs:
+### Repository structure
+
+```
+steward/
+  steward.py          # Main steward logic
+  Dockerfile             # Agent container image
+  docker-compose.yml     # Deploy the agent on a node
+  crontab                # Cron schedule (reconcile)
+  entrypoint.sh          # Container entrypoint
+  examples.yml           # Example app manifests
+  .github/
+    workflows/
+      build.yml          # Lint + test + build and push image to GHCR
+```
+
+### Development setup
+
+Steward uses **uv** for local dependency management and developer commands.
 
 ```bash
-docker compose --project-name <app.name> ...
+uv venv
+uv pip install -r requirements.txt pytest ruff
+uv run pytest -v --tb=short
+uv run ruff check steward.py metrics_server.py tests
 ```
 
-### Do you need migration steps?
+Runtime dependencies are managed with:
 
-In most deployments: no.
+- `requirements.in` for direct dependencies
+- `requirements.txt` for pinned, reproducible installs
 
-- steward has always cloned stacks to `STEWARD_DATA_DIR/stacks/<app.name>`
-- older compose runs used the working directory name as project name
-- that directory name is usually the same as `<app.name>`
-
-So for the common case, project name stays unchanged and rollout is seamless.
-
-### When manual cleanup may be needed
-
-Cleanup is only needed if your old effective compose project name differs from `app.name`
-(for example older manual compose runs from another directory).
-
-Symptoms:
-
-- `docker compose ls` shows both an old project and the new `app.name` project
-- duplicate containers/networks/volumes for one app
-
-### Safe cleanup procedure
-
-1. Let steward run one reconcile cycle after upgrade.
-2. Confirm the new project is healthy:
+To refresh pinned versions:
 
 ```bash
-docker compose --project-name <app.name> -f <compose-file> ps
+uv pip compile requirements.in -o requirements.txt
 ```
 
-3. Stop and remove the old project once the new one is confirmed:
+### Testing a local build
 
-```bash
-docker compose --project-name <old-project-name> -f <compose-file> down --remove-orphans
+To run a locally built image without changing `docker-compose.yml`, set `AGENT_IMAGE` in the `.env` file next to your deployment:
+
+```env
+AGENT_IMAGE=ghcr.io/<you>/steward:dev
 ```
 
-4. Verify only the expected project remains:
+This overrides the pinned tag for that node only and is not tracked by Dependabot.
 
-```bash
-docker compose ls
-```
-
-Notes:
-
-- no manifest schema changes are required for 2.5
-- no env var changes are required for 2.5
-- steward's own stack uses the same explicit project-name logic in helper mode
-
----
-
-## Migration (3.1 JSON state to SQLite)
-
-As of 3.1, steward stores runtime state in SQLite at:
-
-```text
-<GITOPS_ROOT>/steward.db
-```
-
-This replaces the old JSON metrics state file:
-
-```text
-<GITOPS_ROOT>/metrics/state.json
-```
-
-Migration behavior is intentionally **fresh-start**:
-
-- old `metrics/state.json` is ignored
-- no JSON import is performed
-- counters and timestamps begin from the first reconcile after upgrade
-
-If a legacy JSON file is detected, steward logs an info message once to make this explicit.
-
----
-
-## Releasing
+### Releasing
 
 The GitHub Actions workflow (`build.yml`) triggers on two events:
 
@@ -531,7 +425,7 @@ The GitHub Actions workflow (`build.yml`) triggers on two events:
 | Push to `main` | Only when files under `steward/` change |
 | Push of a `v*` tag | Always |
 
-### Image tags produced
+#### Image tags produced
 
 | Event | Tags produced |
 |---|---|
@@ -540,7 +434,7 @@ The GitHub Actions workflow (`build.yml`) triggers on two events:
 
 `latest` is only added on `main` pushes, not on tag pushes.
 
-### How to cut a release
+#### How to cut a release
 
 ```bash
 # Ensure main is up to date and all changes are committed
@@ -558,23 +452,4 @@ git tag v0.1.0
 git push origin main v0.1.0
 ```
 
-### Which tag to use in .env
-
-| Use case | `AGENT_IMAGE` tag |
-|---|---|
-| Auto-update on every `0.x.y` release (recommended) | `:0` |
-| Auto-update only on `0.1.x` patch releases | `:0.1` |
-| Pinned to a specific release, no auto-update | `:v0.1.0` |
-
-The rolling major tag (`:0`) is the recommended choice. It moves with every release in the `0.x` series and stops moving when a breaking `v1.0.0` is cut — giving nodes an explicit opt-in moment for major version upgrades.
-
----
-
-## Extending
-
-Some natural next steps not yet implemented:
-
-- **Dry-run mode** — `python3 steward.py --dry-run` to show what would change without applying
-- **Status command** — print current deployed SHA vs remote SHA for each app
-- **Schema version 2** — reserved for future manifest extensions
-- **Multiple env files** — if ever needed, extend the `env_file` field to a list
+The image tag in `docker-compose.yml` is the source of truth. Dependabot opens a PR on every new release; merging it triggers a self-update on the next reconcile cycle.

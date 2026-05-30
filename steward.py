@@ -488,7 +488,7 @@ def _write_status_snapshot(control_repo: Repo, state: dict) -> bool:
     try:
         control_repo.index.add([str(status_rel)])
         control_repo.index.commit(f"steward: update status for {GITOPS_NODE_NAME}")
-        control_repo.remotes.origin.push(CONTROL_REPO_BRANCH)
+        control_repo.git.push("origin", CONTROL_REPO_BRANCH)
         return True
     except (GitCommandError, OSError, PermissionError) as e:
         log.error("Status writeback failed: %s", e)
@@ -630,7 +630,10 @@ def ensure_repo(url: str, local_path: Path, branch: Optional[str] = None, tag: O
 def fetch_ref(repo: Repo, ref: AppRef) -> bool:
     """Fetch refs from origin so SHA comparison can run against fresh remote state."""
     try:
-        repo.remotes.origin.fetch(tags=bool(ref.tag))
+        if ref.tag:
+            repo.git.fetch("origin", "--tags")
+        else:
+            repo.git.fetch("origin")
         return True
     except GitCommandError as e:
         log.error("git fetch failed: %s", strip_url_credentials(str(e)))
@@ -682,7 +685,7 @@ def apply_ref(repo: Repo, ref: AppRef) -> bool:
     """Apply remote changes for a branch/tag to local working tree."""
     try:
         if ref.branch:
-            repo.remotes.origin.pull(ref.branch)
+            repo.git.pull("origin", ref.branch)
         elif ref.tag:
             repo.git.checkout(ref.tag)
         return True

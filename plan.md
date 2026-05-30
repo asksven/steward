@@ -1252,6 +1252,65 @@ Depends on: Phase 1 complete (script uses same templates as reference).
 
 ---
 
+## Bug: phantom third container after a few days
+
+**Status: collecting evidence — not yet implementing**
+
+After a clean `docker compose up -d` two containers run (steward + metrics server side-car).
+After several days `docker ps` shows three containers. Analysis identified three candidate
+bugs; they need to be validated before a fix is written.
+
+### Candidate Bug 1 — helper container stuck because inner compose has no timeout (most likely)
+
+`spawn_compose_helper` spawns:
+
+```
+docker run --rm -d ... sh -c "sleep 5 && docker compose up -d --remove-orphans --pull always"
+```
+
+`--pull always` contacts the registry on every self-update. A transient GHCR outage or
+throttle causes `docker pull` to retry indefinitely with no deadline. The inner `sh -c` never
+exits; `--rm` never fires; the helper container lives forever.
+
+By contrast `run_compose()` uses `subprocess.run(..., timeout=300)`, so the direct path is
+protected. The helper path has no equivalent guard.
+
+**Proposed fix:** prefix the inner command with `timeout 300` (or equivalent) so the helper
+always exits:
+
+```bash
+sh -c "sleep 5 && timeout 300 docker compose up -d --remove-orphans --pull always"
+```
+
+**Evidence needed:** confirm via `docker ps --all --filter ancestor=ghcr.io/asksven/steward`
+that stuck containers are helpers (not steward itself), and check their uptime.
+
+### Candidate Bug 2 — drift self-heal bypasses `_is_self_update` check
+
+In `reconcile_app`, the live-drift self-heal path (git SYNCED but service not running) calls
+`run_compose(app, stack_path)` directly, bypassing `sync_app` which is the only place
+`_is_self_update` is tested. When steward's own service is the one that drifted, it calls
+`docker compose up -d` on itself, which kills the running process; `restart: unless-stopped`
+brings it back, then the next reconcile cycle sees drift again → kill loop.
+
+This does not directly produce a third container but indicates the helper mechanism is
+completely bypassed for drift-heals of the steward app.
+
+**Evidence needed:** check logs for steward restart events that are not preceded by a git
+SHA change.
+
+### Candidate Bug 3 — no lock between concurrent reconcile processes
+
+Cron fires every minute. If a reconcile run takes > 60 s (many apps, slow fetches), two
+processes run concurrently and both can reach `spawn_compose_helper` before either has
+updated `local_sha`. Both see `OUT_OF_SYNC` and both spawn helpers simultaneously.
+
+Combined with Bug 1, one of those helpers may get permanently stuck.
+
+**Evidence needed:** check whether reconcile duration ever exceeds 60 s in the logs.
+
+---
+
 ## Non-goals
 
 These ArgoCD concepts are deliberately out of scope for steward's design. They are listed here

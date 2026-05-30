@@ -111,3 +111,28 @@ jobs:
           platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  bump-self-image:
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Update image tag in docker-compose.yml
+        run: |
+          NEW_TAG="${{ github.ref_name }}"
+          sed -i "s|ghcr.io/asksven/steward:[^ }]*|ghcr.io/asksven/steward:${NEW_TAG}|g" docker-compose.yml
+
+      - name: Open pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore: bump steward image to ${{ github.ref_name }}"
+          title: "chore: bump steward image to ${{ github.ref_name }}"
+          branch: "bump-steward-${{ github.ref_name }}"
+          labels: dependencies
