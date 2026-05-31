@@ -133,4 +133,5 @@ jobs:
           commit-message: "chore: bump steward image to ${{ github.ref_name }}"
           title: "chore: bump steward image to ${{ github.ref_name }}"
           branch: "bump-steward-${{ github.ref_name }}"
+          base: main
           labels: dependencies
