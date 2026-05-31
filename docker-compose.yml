@@ -1,8 +1,8 @@
 services:
   steward:
     # Version is pinned here and updated by Dependabot PRs.
-    # Override with AGENT_IMAGE in .env for local testing (e.g. AGENT_IMAGE=ghcr.io/asksven/steward:dev).
-    image: ${AGENT_IMAGE:-ghcr.io/asksven/steward:0.3.0}
+    # Override with AGENT_IMAGE in .env for local testing (e.g. AGENT_IMAGE=ghcr.io/asksven/steward:v0.4.1
+    image: ${AGENT_IMAGE:-ghcr.io/asksven/steward:v0.4.1}
     container_name: steward
     restart: unless-stopped
     environment:
