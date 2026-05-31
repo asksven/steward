@@ -432,7 +432,7 @@ The GitHub Actions workflow (`build.yml`) triggers on two events:
 | Event | Tags produced |
 |---|---|
 | Push to `main` | `main`, `sha-<sha>`, `latest` |
-| Push of `v0.1.0` | `v0.1.0`, `0.1.0`, `0.1`, `0`, `sha-<sha>` |
+| Push of `v0.1.0` | `0.1.0`, `sha-<sha>` |
 
 `latest` is only added on `main` pushes, not on tag pushes.
 
