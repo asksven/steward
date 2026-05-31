@@ -1264,8 +1264,12 @@ def test_spawn_compose_helper_uses_explicit_project_name(
     result = steward.spawn_compose_helper(app, Path("/git/stacks/steward"))
 
     assert result is True
+    # entrypoint must be overridden so entrypoint.sh / crond is bypassed
+    assert "--entrypoint" in seen_helper_cmd
+    assert seen_helper_cmd[seen_helper_cmd.index("--entrypoint") + 1] == "sh"
     helper_shell = seen_helper_cmd[-1]
     assert "--project-name steward" in helper_shell
+    assert "timeout 300" in helper_shell
 
 
 def test_check_app_returns_synced() -> None:

@@ -787,9 +787,6 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
         "docker", "compose",
         "--project-name", shlex.quote(app.name),
         "-f", shlex.quote(host_compose_file),
-        "up", "-d",
-        "--remove-orphans",
-        "--pull", shlex.quote(app.pull_policy),
     ]
     if app.env_file:
         host_env = _resolve_host_path(Path(app.env_file))
@@ -800,17 +797,23 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
                 "Self-update: cannot resolve host path for env_file '%s', omitting from helper",
                 app.env_file,
             )
+    inner_parts += [
+        "up", "-d",
+        "--remove-orphans",
+        "--pull", shlex.quote(app.pull_policy),
+    ]
 
     inner_cmd = " ".join(inner_parts)
 
     helper_run = [
         "docker", "run",
         "--rm", "-d",
+        "--entrypoint", "sh",
         "-v", "/var/run/docker.sock:/var/run/docker.sock",
         "-v", f"{host_root}:{host_root}",
         "-e", "HOME=/tmp",
         helper_image,
-        "sh", "-c", f"sleep 5 && {inner_cmd}",
+        "-c", f"sleep 5 && timeout 300 {inner_cmd}",
     ]
 
     log.info("Self-update: spawning helper container (image=%s)", helper_image)
@@ -848,9 +851,6 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
         "docker", "compose",
         "--project-name", app.name,
         "-f", str(compose_file),
-        "up", "-d",
-        "--remove-orphans",
-        "--pull", app.pull_policy,
     ]
 
     env = os.environ.copy()
@@ -865,6 +865,8 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
             )
             return False
         cmd.extend(["--env-file", str(env_path)])
+
+    cmd.extend(["up", "-d", "--remove-orphans", "--pull", app.pull_policy])
 
     log.info("Reconciling app '%s': %s", app.name, " ".join(cmd))
 
@@ -1267,7 +1269,7 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
                 )
                 return True
 
-            healed = run_compose(app, stack_path)
+            healed = spawn_compose_helper(app, stack_path) if _is_self_update(app) else run_compose(app, stack_path)
             _inc(app_state, "sync_total", "success" if healed else "failed")
             _append_operation(
                 state,

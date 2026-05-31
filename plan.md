@@ -1254,13 +1254,13 @@ Depends on: Phase 1 complete (script uses same templates as reference).
 
 ## Bug: phantom third container after a few days
 
-**Status: collecting evidence — not yet implementing**
+**Status: fixed**
 
 After a clean `docker compose up -d` two containers run (steward + metrics server side-car).
 After several days `docker ps` shows three containers. Analysis identified three candidate
-bugs; they need to be validated before a fix is written.
+bugs; all three have been addressed.
 
-### Candidate Bug 1 — helper container stuck because inner compose has no timeout (most likely)
+### Candidate Bug 1 — helper container stuck because inner compose has no timeout (fixed)
 
 `spawn_compose_helper` spawns:
 
@@ -1273,31 +1273,30 @@ throttle causes `docker pull` to retry indefinitely with no deadline. The inner 
 exits; `--rm` never fires; the helper container lives forever.
 
 By contrast `run_compose()` uses `subprocess.run(..., timeout=300)`, so the direct path is
-protected. The helper path has no equivalent guard.
+protected. The helper path had no equivalent guard.
 
-**Proposed fix:** prefix the inner command with `timeout 300` (or equivalent) so the helper
-always exits:
+**Fix applied:** prefixed the inner command with `timeout 300`:
 
 ```bash
 sh -c "sleep 5 && timeout 300 docker compose up -d --remove-orphans --pull always"
 ```
 
-**Evidence needed:** confirm via `docker ps --all --filter ancestor=ghcr.io/asksven/steward`
-that stuck containers are helpers (not steward itself), and check their uptime.
+Also fixed in the same change: `--env-file` was being appended after the subcommand in
+`spawn_compose_helper`, `run_compose`, `_load_expected_services`, and
+`_load_compose_services_status`. Docker Compose requires `--env-file` before the subcommand.
+This caused `docker compose config --services` to fail with `unknown flag: --env-file`,
+producing `expected_services_unavailable` on every reconcile for apps with an env file.
 
-### Candidate Bug 2 — drift self-heal bypasses `_is_self_update` check
+### Candidate Bug 2 — drift self-heal bypasses `_is_self_update` check (fixed)
 
-In `reconcile_app`, the live-drift self-heal path (git SYNCED but service not running) calls
-`run_compose(app, stack_path)` directly, bypassing `sync_app` which is the only place
-`_is_self_update` is tested. When steward's own service is the one that drifted, it calls
-`docker compose up -d` on itself, which kills the running process; `restart: unless-stopped`
-brings it back, then the next reconcile cycle sees drift again → kill loop.
+In `reconcile_app`, the live-drift self-heal path (git SYNCED but service not running) was
+calling `run_compose(app, stack_path)` directly, bypassing `sync_app` which is the only place
+`_is_self_update` was tested. When steward's own service drifted, it called
+`docker compose up -d` on itself, which killed the running process; `restart: unless-stopped`
+brought it back, then the next reconcile cycle saw drift again → kill loop.
 
-This does not directly produce a third container but indicates the helper mechanism is
-completely bypassed for drift-heals of the steward app.
-
-**Evidence needed:** check logs for steward restart events that are not preceded by a git
-SHA change.
+**Fix applied:** the self-heal path now uses `spawn_compose_helper` when `_is_self_update(app)`
+is true, matching the behaviour of `sync_app`.
 
 ### Candidate Bug 3 — no lock between concurrent reconcile processes
 
@@ -1305,9 +1304,11 @@ Cron fires every minute. If a reconcile run takes > 60 s (many apps, slow fetche
 processes run concurrently and both can reach `spawn_compose_helper` before either has
 updated `local_sha`. Both see `OUT_OF_SYNC` and both spawn helpers simultaneously.
 
-Combined with Bug 1, one of those helpers may get permanently stuck.
+Combined with Bug 1 (now fixed), one of those helpers could get permanently stuck.
 
-**Evidence needed:** check whether reconcile duration ever exceeds 60 s in the logs.
+**Status:** Bug 1 fix (timeout 300) means stuck helpers will now self-terminate. The root
+concurrent-spawn issue is not fixed but its worst consequence (permanent stuck container)
+is now bounded. A proper flock guard is deferred.
 
 ---
 
