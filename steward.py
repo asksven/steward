@@ -788,6 +788,20 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
         "--project-name", shlex.quote(app.name),
         "-f", shlex.quote(host_compose_file),
     ]
+
+    # Include override file if present so secrets and host-specific settings survive self-update.
+    # Docker Compose only auto-discovers override files when no explicit -f is given.
+    container_override_file = stack_path / app.path / "docker-compose.override.yml"
+    if container_override_file.exists():
+        host_override_file = _resolve_host_path(container_override_file)
+        if host_override_file:
+            inner_parts += ["-f", shlex.quote(host_override_file)]
+            log.debug("Self-update: including override file %s", host_override_file)
+        else:
+            log.warning(
+                "Self-update: override file found but host path could not be resolved — secrets may be missing"
+            )
+
     if app.env_file:
         host_env = _resolve_host_path(Path(app.env_file))
         if host_env:
