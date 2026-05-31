@@ -908,7 +908,6 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
         "docker", "compose",
         "--project-name", app.name,
         "-f", str(compose_file),
-        "ps", "--format", "json",
     ]
     if app.env_file:
         env_path = Path(app.env_file)
@@ -916,6 +915,7 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
             log.error("env_file not found for health check: %s", env_path)
             return None
         cmd.extend(["--env-file", str(env_path)])
+    cmd.extend(["ps", "--format", "json"])
 
     workdir = stack_path / app.path
 
@@ -974,7 +974,6 @@ def _load_expected_services(app: AppManifest, stack_path: Path) -> Optional[set[
         "docker", "compose",
         "--project-name", app.name,
         "-f", str(compose_file),
-        "config", "--services",
     ]
     if app.env_file:
         env_path = Path(app.env_file)
@@ -982,6 +981,7 @@ def _load_expected_services(app: AppManifest, stack_path: Path) -> Optional[set[
             log.error("env_file not found for drift check: %s", env_path)
             return None
         cmd.extend(["--env-file", str(env_path)])
+    cmd.extend(["config", "--services"])
 
     workdir = stack_path / app.path
 

@@ -956,6 +956,84 @@ def test_detect_live_drift_missing_service(monkeypatch: pytest.MonkeyPatch) -> N
     assert "db:missing" in reason
 
 
+def test_load_expected_services_passes_compose_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("VAR=1\n")
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services:\n  web:\n    image: nginx\n")
+
+    # compose_env_file is normalised to env_file by the manifest parser
+    app = steward.AppManifest(
+        version=2,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=str(env_file),
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "web\n"
+        return result
+
+    monkeypatch.setattr(steward.subprocess, "run", fake_run)
+
+    services = steward._load_expected_services(app, tmp_path)
+
+    assert services == {"web"}
+    assert "--env-file" in calls[0]
+    assert str(env_file) in calls[0]
+    # --env-file must come before the subcommand
+    assert calls[0].index("--env-file") < calls[0].index("config")
+
+
+def test_load_compose_services_status_passes_compose_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("VAR=1\n")
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services:\n  web:\n    image: nginx\n")
+
+    # compose_env_file is normalised to env_file by the manifest parser
+    app = steward.AppManifest(
+        version=2,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=str(env_file),
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = '[{"Service":"web","State":"running"}]\n'
+        return result
+
+    monkeypatch.setattr(steward.subprocess, "run", fake_run)
+
+    rows = steward._load_compose_services_status(app, tmp_path)
+
+    assert rows == [{"Service": "web", "State": "running"}]
+    assert "--env-file" in calls[0]
+    assert str(env_file) in calls[0]
+    # --env-file must come before the subcommand
+    assert calls[0].index("--env-file") < calls[0].index("ps")
+
+
 def test_reconcile_app_synced_drift_manual_logs_skipped_operation(monkeypatch: pytest.MonkeyPatch) -> None:
     app = steward.AppManifest(
         version=2,
