@@ -1196,252 +1196,258 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
         _inc(app_state, "reconcile_total", "failed")
         return False
 
-    if not fetch_ref(repo, app.ref):
-        app_state["sync_status"] = SyncStatus.UNKNOWN.value
-        app_state["health_status"] = HEALTH_STATUS_UNKNOWN
-        _inc(app_state, "reconcile_total", "failed")
-        return False
-
-    check = check_app(repo, app.ref)
-    app_state["deployed_sha"] = check.local_sha
-    app_state["remote_sha"] = check.remote_sha
-
-    if check.status == SyncStatus.UNKNOWN:
-        app_state["sync_status"] = SyncStatus.UNKNOWN.value
-        app_state["health_status"] = HEALTH_STATUS_UNKNOWN
-        _inc(app_state, "reconcile_total", "failed")
-        return False
-
-    if check.status == SyncStatus.SYNCED:
-        drifted, drift_reason = _detect_live_drift(app, stack_path)
-        if drift_reason in ("expected_services_unavailable", "live_state_unavailable"):
-            log.warning(
-                "App '%s' live state cannot be determined (%s), reporting Unknown",
-                app.name,
-                drift_reason,
-            )
+    # Use try/finally to ensure the Repo object is always closed. GitPython keeps
+    # persistent 'git cat-file --batch' processes alive for the lifetime of the Repo
+    # object. Without explicit close(), these accumulate as zombies across cron runs.
+    try:
+        if not fetch_ref(repo, app.ref):
             app_state["sync_status"] = SyncStatus.UNKNOWN.value
             app_state["health_status"] = HEALTH_STATUS_UNKNOWN
             _inc(app_state, "reconcile_total", "failed")
             return False
-        if drifted:
-            app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
 
-            if app.sync_policy == "manual":
-                log.info("App '%s' has live drift but sync_policy=manual, skipping self-heal", app.name)
-                app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
-                _inc(app_state, "reconcile_total", "skipped")
-                _append_operation(
-                    state,
-                    app=app,
-                    trigger="self_heal",
-                    from_sha=check.local_sha,
-                    to_sha=check.remote_sha,
-                    sync_status="Skipped",
-                    message=f"manual_policy_skip:{drift_reason}",
-                    health_status=app_state.get("health_status"),
-                )
-                _send_notification(
-                    app,
-                    "drift_detected",
-                    {
-                        "sync_policy": app.sync_policy,
-                        "sync_status": app_state["sync_status"],
-                        "health_status": app_state.get("health_status"),
-                        "deployed_sha": check.local_sha,
-                        "remote_sha": check.remote_sha,
-                        "message": drift_reason,
-                    },
-                )
-                return True
+        check = check_app(repo, app.ref)
+        app_state["deployed_sha"] = check.local_sha
+        app_state["remote_sha"] = check.remote_sha
 
-            log.warning("App '%s' has live drift, attempting self-heal: %s", app.name, drift_reason)
-            if STEWARD_DRY_RUN:
-                app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
-                _inc(app_state, "reconcile_total", "skipped")
-                _append_operation(
-                    state,
-                    app=app,
-                    trigger="self_heal",
-                    from_sha=check.local_sha,
-                    to_sha=check.remote_sha,
-                    sync_status="Skipped",
-                    message=f"dry_run_skip:{drift_reason}",
-                    health_status=app_state.get("health_status"),
-                )
-                _send_notification(
-                    app,
-                    "drift_detected",
-                    {
-                        "sync_policy": app.sync_policy,
-                        "sync_status": app_state["sync_status"],
-                        "health_status": app_state.get("health_status"),
-                        "deployed_sha": check.local_sha,
-                        "remote_sha": check.remote_sha,
-                        "message": f"dry-run mode: {drift_reason}",
-                    },
-                )
-                return True
+        if check.status == SyncStatus.UNKNOWN:
+            app_state["sync_status"] = SyncStatus.UNKNOWN.value
+            app_state["health_status"] = HEALTH_STATUS_UNKNOWN
+            _inc(app_state, "reconcile_total", "failed")
+            return False
 
-            healed = spawn_compose_helper(app, stack_path) if _is_self_update(app) else run_compose(app, stack_path)
-            _inc(app_state, "sync_total", "success" if healed else "failed")
-            _append_operation(
-                state,
-                app=app,
-                trigger="self_heal",
-                from_sha=check.local_sha,
-                to_sha=check.remote_sha,
-                sync_status="Synced" if healed else "Failed",
-                message=drift_reason if healed else f"self_heal_failed:{drift_reason}",
-                health_status=None,
-            )
-
-            if not healed:
-                app_state["health_status"] = HEALTH_STATUS_DEGRADED
+        if check.status == SyncStatus.SYNCED:
+            drifted, drift_reason = _detect_live_drift(app, stack_path)
+            if drift_reason in ("expected_services_unavailable", "live_state_unavailable"):
+                log.warning(
+                    "App '%s' live state cannot be determined (%s), reporting Unknown",
+                    app.name,
+                    drift_reason,
+                )
+                app_state["sync_status"] = SyncStatus.UNKNOWN.value
+                app_state["health_status"] = HEALTH_STATUS_UNKNOWN
                 _inc(app_state, "reconcile_total", "failed")
+                return False
+            if drifted:
+                app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
+
+                if app.sync_policy == "manual":
+                    log.info("App '%s' has live drift but sync_policy=manual, skipping self-heal", app.name)
+                    app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
+                    _inc(app_state, "reconcile_total", "skipped")
+                    _append_operation(
+                        state,
+                        app=app,
+                        trigger="self_heal",
+                        from_sha=check.local_sha,
+                        to_sha=check.remote_sha,
+                        sync_status="Skipped",
+                        message=f"manual_policy_skip:{drift_reason}",
+                        health_status=app_state.get("health_status"),
+                    )
+                    _send_notification(
+                        app,
+                        "drift_detected",
+                        {
+                            "sync_policy": app.sync_policy,
+                            "sync_status": app_state["sync_status"],
+                            "health_status": app_state.get("health_status"),
+                            "deployed_sha": check.local_sha,
+                            "remote_sha": check.remote_sha,
+                            "message": drift_reason,
+                        },
+                    )
+                    return True
+
+                log.warning("App '%s' has live drift, attempting self-heal: %s", app.name, drift_reason)
+                if STEWARD_DRY_RUN:
+                    app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
+                    _inc(app_state, "reconcile_total", "skipped")
+                    _append_operation(
+                        state,
+                        app=app,
+                        trigger="self_heal",
+                        from_sha=check.local_sha,
+                        to_sha=check.remote_sha,
+                        sync_status="Skipped",
+                        message=f"dry_run_skip:{drift_reason}",
+                        health_status=app_state.get("health_status"),
+                    )
+                    _send_notification(
+                        app,
+                        "drift_detected",
+                        {
+                            "sync_policy": app.sync_policy,
+                            "sync_status": app_state["sync_status"],
+                            "health_status": app_state.get("health_status"),
+                            "deployed_sha": check.local_sha,
+                            "remote_sha": check.remote_sha,
+                            "message": f"dry-run mode: {drift_reason}",
+                        },
+                    )
+                    return True
+
+                healed = spawn_compose_helper(app, stack_path) if _is_self_update(app) else run_compose(app, stack_path)
+                _inc(app_state, "sync_total", "success" if healed else "failed")
+                _append_operation(
+                    state,
+                    app=app,
+                    trigger="self_heal",
+                    from_sha=check.local_sha,
+                    to_sha=check.remote_sha,
+                    sync_status="Synced" if healed else "Failed",
+                    message=drift_reason if healed else f"self_heal_failed:{drift_reason}",
+                    health_status=None,
+                )
+
+                if not healed:
+                    app_state["health_status"] = HEALTH_STATUS_DEGRADED
+                    _inc(app_state, "reconcile_total", "failed")
+                    _send_notification(
+                        app,
+                        "sync_failed",
+                        {
+                            "sync_policy": app.sync_policy,
+                            "sync_status": app_state["sync_status"],
+                            "health_status": app_state.get("health_status"),
+                            "deployed_sha": check.local_sha,
+                            "remote_sha": check.remote_sha,
+                            "message": drift_reason,
+                        },
+                    )
+                    return False
+
+                log.warning("out-of-band drift detected and healed for app %s", app.name)
+                _inc(app_state, "ooband_heal_total")
+                app_state["sync_status"] = SyncStatus.SYNCED.value
+                app_state["last_sync_timestamp"] = time.time()
+                app_state["health_status"] = HEALTH_STATUS_PROGRESSING
+                _inc(app_state, "reconcile_total", "success")
+                return True
+
+            log.info("App '%s' is up to date, no action needed", app.name)
+            app_state["sync_status"] = SyncStatus.SYNCED.value
+            app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
+            if app_state["health_status"] == HEALTH_STATUS_DEGRADED:
                 _send_notification(
                     app,
-                    "sync_failed",
+                    "health_degraded",
                     {
                         "sync_policy": app.sync_policy,
                         "sync_status": app_state["sync_status"],
-                        "health_status": app_state.get("health_status"),
+                        "health_status": app_state["health_status"],
                         "deployed_sha": check.local_sha,
                         "remote_sha": check.remote_sha,
-                        "message": drift_reason,
+                        "message": "service health degraded",
                     },
                 )
-                return False
-
-            log.warning("out-of-band drift detected and healed for app %s", app.name)
-            _inc(app_state, "ooband_heal_total")
-            app_state["sync_status"] = SyncStatus.SYNCED.value
-            app_state["last_sync_timestamp"] = time.time()
-            app_state["health_status"] = HEALTH_STATUS_PROGRESSING
             _inc(app_state, "reconcile_total", "success")
             return True
 
-        log.info("App '%s' is up to date, no action needed", app.name)
-        app_state["sync_status"] = SyncStatus.SYNCED.value
-        app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
-        if app_state["health_status"] == HEALTH_STATUS_DEGRADED:
+        local_sha = check.local_sha or ""
+        remote_sha = check.remote_sha or ""
+        log.info(
+            "Repo %s has changes: %s → %s",
+            repo.working_dir,
+            local_sha[:8],
+            remote_sha[:8],
+        )
+
+        if app.sync_policy == "manual":
+            log.info("App '%s' is out of sync, but sync_policy=manual so apply is skipped", app.name)
+            app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
+            app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
+            _inc(app_state, "reconcile_total", "skipped")
+            _append_operation(
+                state,
+                app=app,
+                trigger="git_change",
+                from_sha=local_sha,
+                to_sha=remote_sha,
+                sync_status="Skipped",
+                message="manual_policy_skip",
+                health_status=app_state.get("health_status"),
+            )
             _send_notification(
                 app,
-                "health_degraded",
+                "drift_detected",
                 {
                     "sync_policy": app.sync_policy,
                     "sync_status": app_state["sync_status"],
-                    "health_status": app_state["health_status"],
-                    "deployed_sha": check.local_sha,
-                    "remote_sha": check.remote_sha,
-                    "message": "service health degraded",
+                    "health_status": app_state.get("health_status"),
+                    "deployed_sha": local_sha,
+                    "remote_sha": remote_sha,
+                    "message": "git drift detected while sync_policy=manual",
                 },
             )
-        _inc(app_state, "reconcile_total", "success")
-        return True
+            return True
 
-    local_sha = check.local_sha or ""
-    remote_sha = check.remote_sha or ""
-    log.info(
-        "Repo %s has changes: %s → %s",
-        repo.working_dir,
-        local_sha[:8],
-        remote_sha[:8],
-    )
+        if STEWARD_DRY_RUN:
+            log.info("App '%s' is out of sync, but STEWARD_DRY_RUN=true so apply is skipped", app.name)
+            app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
+            app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
+            _inc(app_state, "reconcile_total", "skipped")
+            _append_operation(
+                state,
+                app=app,
+                trigger="git_change",
+                from_sha=local_sha,
+                to_sha=remote_sha,
+                sync_status="Skipped",
+                message="dry_run_skip",
+                health_status=app_state.get("health_status"),
+            )
+            _send_notification(
+                app,
+                "drift_detected",
+                {
+                    "sync_policy": app.sync_policy,
+                    "sync_status": app_state["sync_status"],
+                    "health_status": app_state.get("health_status"),
+                    "deployed_sha": local_sha,
+                    "remote_sha": remote_sha,
+                    "message": "git drift detected while STEWARD_DRY_RUN=true",
+                },
+            )
+            return True
 
-    if app.sync_policy == "manual":
-        log.info("App '%s' is out of sync, but sync_policy=manual so apply is skipped", app.name)
-        app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
-        app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
-        _inc(app_state, "reconcile_total", "skipped")
+        sync = sync_app(app, repo, stack_path)
+        _inc(app_state, "sync_total", "success" if sync.success else "failed")
         _append_operation(
             state,
             app=app,
             trigger="git_change",
             from_sha=local_sha,
             to_sha=remote_sha,
-            sync_status="Skipped",
-            message="manual_policy_skip",
-            health_status=app_state.get("health_status"),
+            sync_status="Synced" if sync.success else "Failed",
+            message=sync.message,
+            health_status=None,
         )
-        _send_notification(
-            app,
-            "drift_detected",
-            {
-                "sync_policy": app.sync_policy,
-                "sync_status": app_state["sync_status"],
-                "health_status": app_state.get("health_status"),
-                "deployed_sha": local_sha,
-                "remote_sha": remote_sha,
-                "message": "git drift detected while sync_policy=manual",
-            },
-        )
-        return True
-
-    if STEWARD_DRY_RUN:
-        log.info("App '%s' is out of sync, but STEWARD_DRY_RUN=true so apply is skipped", app.name)
-        app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
-        app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
-        _inc(app_state, "reconcile_total", "skipped")
-        _append_operation(
-            state,
-            app=app,
-            trigger="git_change",
-            from_sha=local_sha,
-            to_sha=remote_sha,
-            sync_status="Skipped",
-            message="dry_run_skip",
-            health_status=app_state.get("health_status"),
-        )
-        _send_notification(
-            app,
-            "drift_detected",
-            {
-                "sync_policy": app.sync_policy,
-                "sync_status": app_state["sync_status"],
-                "health_status": app_state.get("health_status"),
-                "deployed_sha": local_sha,
-                "remote_sha": remote_sha,
-                "message": "git drift detected while STEWARD_DRY_RUN=true",
-            },
-        )
-        return True
-
-    sync = sync_app(app, repo, stack_path)
-    _inc(app_state, "sync_total", "success" if sync.success else "failed")
-    _append_operation(
-        state,
-        app=app,
-        trigger="git_change",
-        from_sha=local_sha,
-        to_sha=remote_sha,
-        sync_status="Synced" if sync.success else "Failed",
-        message=sync.message,
-        health_status=None,
-    )
-    if sync.success:
-        app_state["sync_status"] = SyncStatus.SYNCED.value
-        app_state["deployed_sha"] = remote_sha
-        app_state["last_sync_timestamp"] = time.time()
-        app_state["health_status"] = HEALTH_STATUS_PROGRESSING
-        _inc(app_state, "reconcile_total", "success")
-    else:
-        app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
-        app_state["health_status"] = HEALTH_STATUS_UNKNOWN
-        _inc(app_state, "reconcile_total", "failed")
-        _send_notification(
-            app,
-            "sync_failed",
-            {
-                "sync_policy": app.sync_policy,
-                "sync_status": app_state["sync_status"],
-                "health_status": app_state.get("health_status"),
-                "deployed_sha": local_sha,
-                "remote_sha": remote_sha,
-                "message": sync.message,
-            },
-        )
-    return sync.success
+        if sync.success:
+            app_state["sync_status"] = SyncStatus.SYNCED.value
+            app_state["deployed_sha"] = remote_sha
+            app_state["last_sync_timestamp"] = time.time()
+            app_state["health_status"] = HEALTH_STATUS_PROGRESSING
+            _inc(app_state, "reconcile_total", "success")
+        else:
+            app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
+            app_state["health_status"] = HEALTH_STATUS_UNKNOWN
+            _inc(app_state, "reconcile_total", "failed")
+            _send_notification(
+                app,
+                "sync_failed",
+                {
+                    "sync_policy": app.sync_policy,
+                    "sync_status": app_state["sync_status"],
+                    "health_status": app_state.get("health_status"),
+                    "deployed_sha": local_sha,
+                    "remote_sha": remote_sha,
+                    "message": sync.message,
+                },
+            )
+        return sync.success
+    finally:
+        repo.close()
 
 
 def reconcile() -> int:
@@ -1559,6 +1565,7 @@ def reconcile() -> int:
 
     # Step 4: write observed status snapshot back to control repo
     status_write_ok = _write_status_snapshot(control_repo, state)
+    control_repo.close()
     if not status_write_ok:
         log.warning("Status writeback failed; marking run as partial failure")
         results["_status_writeback"] = "failed"

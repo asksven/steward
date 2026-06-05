@@ -1392,6 +1392,9 @@ def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) ->
     class _FakeRepo:
         working_dir = "/tmp/control"
 
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
     monkeypatch.setattr(steward, "_load_metrics_state", lambda: {"node": steward.GITOPS_NODE_NAME})
 
@@ -1429,6 +1432,9 @@ def test_reconcile_returns_partial_failure_when_status_writeback_fails(
 
     class _FakeRepo:
         working_dir = "/tmp/control"
+
+        def close(self) -> None:
+            pass
 
     saved: dict = {}
 
@@ -1632,6 +1638,9 @@ def test_reconcile_parse_error_app_appears_as_failed(monkeypatch: pytest.MonkeyP
     class _FakeRepo:
         working_dir = "/tmp/control"
 
+        def close(self) -> None:
+            pass
+
     saved: dict = {}
 
     monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
@@ -1661,6 +1670,9 @@ def test_reconcile_parse_error_run_result_is_partial_failure(monkeypatch: pytest
 
     class _FakeRepo:
         working_dir = "/tmp/control"
+
+        def close(self) -> None:
+            pass
 
     saved: dict = {}
 
