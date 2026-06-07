@@ -1565,7 +1565,10 @@ def reconcile() -> int:
 
     # Step 4: write observed status snapshot back to control repo
     status_write_ok = _write_status_snapshot(control_repo, state)
-    control_repo.close()
+    try:
+        control_repo.close()
+    except Exception:
+        pass
     if not status_write_ok:
         log.warning("Status writeback failed; marking run as partial failure")
         results["_status_writeback"] = "failed"

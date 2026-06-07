@@ -5,6 +5,7 @@ services:
     image: ${AGENT_IMAGE:-ghcr.io/asksven/steward:v0.4.1}
     container_name: steward
     restart: unless-stopped
+    init: true  # reap zombie processes (defence-in-depth alongside tini in the image)
     environment:
       # Required — set in .env
       CONTROL_REPO_URL: ${CONTROL_REPO_URL}

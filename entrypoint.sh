@@ -125,6 +125,8 @@ else
   sh -lc 'cd /app && python3 /app/steward.py reconcile' || true
 fi
 
-# Start cron in foreground, log to stdout
+# Start cron in foreground under tini (PID 1) so orphaned git/ssh children are reaped.
+# Without a reaping init, busybox crond never calls wait() and zombie processes
+# accumulate until the host PID space is exhausted.
 echo "Starting crond..."
-exec crond -f -l 6
+exec tini -- crond -f -l 6

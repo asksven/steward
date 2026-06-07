@@ -1330,3 +1330,49 @@ to prevent scope creep and to document the reasoning.
   for application-level secrets (database passwords, API keys for apps). Integration with Vault,
   SOPS, or similar for *app secrets* is out of scope; steward is not a secrets operator.
   Note: *git credential handling* (SSH keys, tokens for repo access) is in scope — see Goal 6.
+
+
+---
+
+## Fix: Zombie process leak (PID 1 reaping failure)
+
+### Diagnosis
+
+**Symptoms:** `error: cannot fork() for ssh: Resource temporarily unavailable` on all git
+operations; status writeback also fails with `[Errno 11]`.
+
+**Evidence gathered:**
+- `ulimit -u` inside container → `unlimited` (not a container nproc limit)
+- `ps -u 1000 --no-headers | wc -l` on host → **9067 processes** for UID 1000
+- `ps -u 1000 -o stat,comm` breakdown: **9036 `Zs git`**, 21 `Z ssh`, ~9060 zombies total
+- Reconcile duration graph is healthy (5–10 s baseline); confirms NOT overlapping runs
+
+**Root cause:** Two compounding defects:
+
+1. **PID 1 is busybox `crond`** (`exec crond -f -l 6` in entrypoint) — crond never calls
+   `wait()`, so orphaned children reparent to it and become permanent zombies.
+2. **GitPython keeps persistent `git cat-file --batch` and `ssh` children alive** per `Repo`
+   object. When each per-minute reconcile process exits, those children are orphaned and
+   reparent to PID 1 (crond). With no reaping init, they accumulate at ~1440/day, reaching
+   9036 over ~6–8 days until the host PID space is exhausted.
+
+Secondary: `control_repo.close()` (steward.py) was not in a `try/finally`, risking a close
+skip if status writeback raised — reduces zombie rate when fixed.
+
+### Fix
+
+**Files changed:**
+
+| File | Change |
+|---|---|
+| `Dockerfile` | Added `tini=~0.19` to `apk add` |
+| `entrypoint.sh` | Changed `exec crond -f -l 6` → `exec tini -- crond -f -l 6` |
+| `docker-compose.yml` | Added `init: true` (defence-in-depth) |
+| `steward.py` | Wrapped `control_repo.close()` in `try/except` |
+
+tini becomes PID 1 and reaps every orphaned zombie in the namespace automatically (no `-s`
+subreaper flag needed when tini IS PID 1). `init: true` in compose is redundant with the
+image fix but covers bootstrap/local deploys and documents intent.
+
+**Cleanup:** Deploying the new container image recreates the container, clearing the
+accumulated 9036 zombies via a fresh PID namespace.
