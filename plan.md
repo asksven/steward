@@ -1409,7 +1409,7 @@ accumulated 9036 zombies via a fresh PID namespace.
 
 ### Follow-up: tini PID-1 warning regression
 
-**Status: planned (not yet implemented)**
+**Status: implemented 2026-06-11** (Option A).
 
 The zombie fix added BOTH `init: true` in `docker-compose.yml` AND `exec tini -- crond` in
 `entrypoint.sh`. With `init: true`, Docker injects `docker-init` as PID 1, so the entrypoint's
@@ -1440,7 +1440,8 @@ children are still reaped (docker-init at PID 1).
 
 ## Decision: drop git status writeback (return to GitOps principles)
 
-**Status: decided 2026-06-10 — implementation pending.**
+**Status: implemented 2026-06-11** (decided 2026-06-10). Writeback removed, `apply_ref`
+self-heal hardening added, observability alerts + docs + tests updated.
 
 ### Trigger
 
@@ -1517,9 +1518,39 @@ fast-forwards.
 - `sequence.md`: amend the Phase 7 note — 2.1 writeback removed 2026-06-10; 2.2 (dry-run / oob
   contract) stays.
 
+**Sync hardening (`apply_ref` self-heal — now in scope, 2026-06-11):**
+
+Removing writeback prevents steward from *creating* a divergent control repo, but it does not
+*recover* a node that is already wedged (media-1 today), nor one that diverges from manual drift
+or a leftover pre-upgrade commit. Harden the branch sync path so a working copy always converges
+to its remote.
+
+- **Defect:** `apply_ref` does a bare `repo.git.pull("origin", ref.branch)`. On git ≥ 2.27 a
+  divergent branch fails with `exit 128` ("You have divergent branches…"), and even a clean
+  non-fast-forward leaves the repo stuck. There is no recovery path.
+- **Fix:** in `apply_ref`, for a **branch** ref, replace the bare pull with fetch + fast-forward,
+  and on divergence (or non-fast-forward) **`git reset --hard origin/<branch>`** to force the
+  working copy back to the remote tip. This is safe in steward's model: local working copies are
+  caches of *desired* state — git is the source of truth, so a local-only commit is never
+  intentional and is always discardable. Log a clear WARNING when a hard reset occurs (records
+  that local commits were discarded, with the abandoned SHA).
+- **Scope note:** `apply_ref` is shared by the control repo **and** app repos via `sync_repo`.
+  The self-heal applies to **both** — an app working copy that has drifted should also snap back
+  to its declared ref. (Steward never writes to app repos either, so this only ever discards
+  manual/out-of-band local commits, which is the desired GitOps behaviour.)
+- **Tag refs** (`ref.tag`) keep using `git checkout <tag>`; no change needed (detached checkout
+  to an immutable tag never diverges).
+- **Edge cases to handle:** ensure `origin/<branch>` exists locally after fetch before resetting;
+  if the fetch itself fails, return the existing error path (do not reset to a stale ref).
+
 **Tests:**
 - Add a guard test: a reconcile performs **no** commit/push on the control repo (HEAD stays at
   `origin` HEAD). (No existing writeback tests to delete.)
+- Add a self-heal test: given a local repo with a divergent commit, `apply_ref` resets it to
+  `origin/<branch>` and the abandoned commit is gone (HEAD == origin HEAD), and the WARNING is
+  logged.
+- Add a fast-forward test: a normal remote-ahead branch still advances via `apply_ref` without a
+  hard reset (no spurious reset when the local copy is simply behind).
 
 ### Decided follow-ups
 
@@ -1527,14 +1558,14 @@ fast-forwards.
    stale observed-state artifacts. This is a **one-time manual cleanup commit by a human** (steward
    no longer touches the control repo). Also scan the control repo / homelab-gitops for any
    consumer that reads `status.json` and adjust it so nothing breaks.
-2. Optional control-repo `reset --hard origin/<branch>` self-heal hardening: **deferred** —
-   fast-forward is guaranteed once writeback is gone; revisit only if manual drift on a node bites.
 
 ### Operational recovery (manual, one-off)
 
-media-1 is currently wedged on a divergent local control-repo commit. Recover with
-`git -C /git/control reset --hard origin/main` (or redeploy the container). This cannot recur
-once the writeback removal ships.
+media-1 is currently wedged on a divergent local control-repo commit. With the `apply_ref`
+self-heal in scope, the **next reconcile after the fix ships will reset it automatically** to
+`origin/main` (logging the discarded SHA). A manual `git -C /git/control reset --hard origin/main`
+(or container redeploy) is still available to recover before the new image is rolled out. Neither
+the divergence nor the wedge can recur once writeback removal + self-heal ship.
 
 ### Verification
 

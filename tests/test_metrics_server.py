@@ -107,7 +107,9 @@ def _prepare_db(path: Path, node: str) -> None:
     conn.close()
 
 
-def test_load_state_from_db_and_format_metrics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_state_from_db_and_format_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "steward.db"
     node = "node-a"
     _prepare_db(db_path, node)
@@ -131,7 +133,9 @@ def test_load_state_from_db_and_format_metrics(tmp_path: Path, monkeypatch: pyte
     assert 'steward_app_ooband_heal_total{node="node-a",app="demo"} 0' in body
 
 
-def test_oob_heal_metric_uses_operations_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_oob_heal_metric_uses_operations_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db_path = tmp_path / "steward.db"
     node = "node-a"
     _prepare_db(db_path, node)

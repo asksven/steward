@@ -51,56 +51,106 @@ def format_metrics(state: dict) -> str:
     rec = state.get("reconcile", {})
 
     if "last_timestamp" in rec:
-        write("Unix timestamp of last completed reconciliation run", "gauge",
-              "steward_reconcile_last_timestamp_seconds",
-              rec["last_timestamp"], node=node)
+        write(
+            "Unix timestamp of last completed reconciliation run",
+            "gauge",
+            "steward_reconcile_last_timestamp_seconds",
+            rec["last_timestamp"],
+            node=node,
+        )
 
     if "last_duration_seconds" in rec:
-        write("Duration of last reconciliation run in seconds", "gauge",
-              "steward_reconcile_duration_seconds",
-              rec["last_duration_seconds"], node=node)
+        write(
+            "Duration of last reconciliation run in seconds",
+            "gauge",
+            "steward_reconcile_duration_seconds",
+            rec["last_duration_seconds"],
+            node=node,
+        )
 
     for result, count in rec.get("total", {}).items():
-        write("Total reconciliation runs by result", "counter",
-              "steward_reconcile_total", count, node=node, result=result)
+        write(
+            "Total reconciliation runs by result",
+            "counter",
+            "steward_reconcile_total",
+            count,
+            node=node,
+            result=result,
+        )
 
     for result, count in rec.get("control_repo_sync_total", {}).items():
-        write("Total control repo sync attempts by result", "counter",
-              "steward_control_repo_sync_total", count, node=node, result=result)
+        write(
+            "Total control repo sync attempts by result",
+            "counter",
+            "steward_control_repo_sync_total",
+            count,
+            node=node,
+            result=result,
+        )
 
     if "manifest_parse_errors" in rec:
-        write("Total manifest parse errors encountered", "counter",
-              "steward_manifest_parse_errors_total",
-              rec["manifest_parse_errors"], node=node)
+        write(
+            "Total manifest parse errors encountered",
+            "counter",
+            "steward_manifest_parse_errors_total",
+            rec["manifest_parse_errors"],
+            node=node,
+        )
 
     # --- app-level ---
     for app_name, app in state.get("apps", {}).items():
         base = dict(node=node, app=app_name)
 
-        write("Application information", "gauge", "steward_app_info", 1,
-              node=node, app=app_name,
-              repo=app.get("repo", ""),
-              ref=app.get("ref", ""),
-              ref_type=app.get("ref_type", ""),
-              enabled=str(app.get("enabled", True)).lower())
+        write(
+            "Application information",
+            "gauge",
+            "steward_app_info",
+            1,
+            node=node,
+            app=app_name,
+            repo=app.get("repo", ""),
+            ref=app.get("ref", ""),
+            ref_type=app.get("ref_type", ""),
+            enabled=str(app.get("enabled", True)).lower(),
+        )
 
         if "last_reconcile_timestamp" in app:
-            write("Unix timestamp of last reconcile attempt", "gauge",
-                  "steward_app_last_reconcile_timestamp_seconds",
-                  app["last_reconcile_timestamp"], **base)
+            write(
+                "Unix timestamp of last reconcile attempt",
+                "gauge",
+                "steward_app_last_reconcile_timestamp_seconds",
+                app["last_reconcile_timestamp"],
+                **base,
+            )
 
         if "last_sync_timestamp" in app:
-            write("Unix timestamp of last docker compose run", "gauge",
-                  "steward_app_last_sync_timestamp_seconds",
-                  app["last_sync_timestamp"], **base)
+            write(
+                "Unix timestamp of last docker compose run",
+                "gauge",
+                "steward_app_last_sync_timestamp_seconds",
+                app["last_sync_timestamp"],
+                **base,
+            )
 
         for result, count in app.get("reconcile_total", {}).items():
-            write("Total reconcile attempts per app by result", "counter",
-                  "steward_app_reconcile_total", count, **base, result=result)
+            write(
+                "Total reconcile attempts per app by result",
+                "counter",
+                "steward_app_reconcile_total",
+                count,
+                **base,
+                result=result,
+            )
 
         for result, count in app.get("sync_total", {}).items():
-            write("Total docker compose runs per app by result", "counter",
-                  "steward_app_sync_total", count, **base, result=result)
+            write(
+                "Total docker compose runs per app by result",
+                "counter",
+                "steward_app_sync_total",
+                count,
+                **base,
+                result=result,
+            )
 
         write(
             "Total out-of-band drifts healed per app",

@@ -125,8 +125,8 @@ else
   sh -lc 'cd /app && python3 /app/steward.py reconcile' || true
 fi
 
-# Start cron in foreground under tini (PID 1) so orphaned git/ssh children are reaped.
-# Without a reaping init, busybox crond never calls wait() and zombie processes
-# accumulate until the host PID space is exhausted.
+# Start cron in the foreground. Zombie reaping is provided by the compose
+# `init: true` setting (docker-init runs as PID 1 and reaps orphaned git/ssh
+# children); busybox crond never calls wait() on its own.
 echo "Starting crond..."
-exec tini -- crond -f -l 6
+exec crond -f -l 6

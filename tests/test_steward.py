@@ -1,11 +1,10 @@
-import json
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from git import GitCommandError
+from git import GitCommandError, Repo
 
 import steward
 
@@ -178,8 +177,14 @@ def test_validate_repo_url_rejects_https_with_credentials() -> None:
 
 
 def test_strip_url_credentials_removes_userinfo() -> None:
-    assert steward.strip_url_credentials("https://oauth2:secret@github.com/org/repo") == "https://github.com/org/repo"
-    assert steward.strip_url_credentials("https://user:pass@gitlab.com/org/repo.git") == "https://gitlab.com/org/repo.git"
+    assert (
+        steward.strip_url_credentials("https://oauth2:secret@github.com/org/repo")
+        == "https://github.com/org/repo"
+    )
+    assert (
+        steward.strip_url_credentials("https://user:pass@gitlab.com/org/repo.git")
+        == "https://gitlab.com/org/repo.git"
+    )
 
 
 def test_strip_url_credentials_preserves_ssh_url() -> None:
@@ -190,6 +195,7 @@ def test_strip_url_credentials_preserves_ssh_url() -> None:
 # ---------------------------------------------------------------------------
 # credentials.yml — parse_credentials_file
 # ---------------------------------------------------------------------------
+
 
 def test_parse_credentials_file_valid(tmp_path: Path) -> None:
     creds_file = tmp_path / "credentials.yml"
@@ -215,9 +221,7 @@ def test_parse_credentials_file_valid(tmp_path: Path) -> None:
 def test_parse_credentials_file_without_known_hosts(tmp_path: Path) -> None:
     creds_file = tmp_path / "credentials.yml"
     creds_file.write_text(
-        "credentials:\n"
-        "  - pattern: github.com\n"
-        "    key_file: /run/secrets/github_key\n"
+        "credentials:\n  - pattern: github.com\n    key_file: /run/secrets/github_key\n"
     )
 
     cfg = steward.parse_credentials_file(str(creds_file))
@@ -227,10 +231,7 @@ def test_parse_credentials_file_without_known_hosts(tmp_path: Path) -> None:
 
 def test_parse_credentials_file_rejects_missing_pattern(tmp_path: Path) -> None:
     creds_file = tmp_path / "credentials.yml"
-    creds_file.write_text(
-        "credentials:\n"
-        "  - key_file: /run/secrets/github_key\n"
-    )
+    creds_file.write_text("credentials:\n  - key_file: /run/secrets/github_key\n")
 
     with pytest.raises(ValueError, match="pattern"):
         steward.parse_credentials_file(str(creds_file))
@@ -238,10 +239,7 @@ def test_parse_credentials_file_rejects_missing_pattern(tmp_path: Path) -> None:
 
 def test_parse_credentials_file_rejects_missing_key_file(tmp_path: Path) -> None:
     creds_file = tmp_path / "credentials.yml"
-    creds_file.write_text(
-        "credentials:\n"
-        "  - pattern: github.com\n"
-    )
+    creds_file.write_text("credentials:\n  - pattern: github.com\n")
 
     with pytest.raises(ValueError, match="key_file"):
         steward.parse_credentials_file(str(creds_file))
@@ -260,9 +258,7 @@ def test_parse_credentials_file_warns_on_path_component_pattern(
 ) -> None:
     creds_file = tmp_path / "credentials.yml"
     creds_file.write_text(
-        "credentials:\n"
-        "  - pattern: github.com/myorg\n"
-        "    key_file: /run/secrets/org_key\n"
+        "credentials:\n  - pattern: github.com/myorg\n    key_file: /run/secrets/org_key\n"
     )
 
     warnings = []
@@ -277,6 +273,7 @@ def test_parse_credentials_file_warns_on_path_component_pattern(
 # ---------------------------------------------------------------------------
 # credentials.yml — generate_ssh_config
 # ---------------------------------------------------------------------------
+
 
 def test_generate_ssh_config_two_keys() -> None:
     cfg = steward.CredentialsConfig(
@@ -350,7 +347,9 @@ def test_generate_ssh_config_wildcard_fallback() -> None:
 def test_fetch_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = MagicMock()
     repo.git.fetch.side_effect = GitCommandError(
-        "fetch", 128, stderr="fatal: repository 'https://oauth2:s3cr3t@github.com/org/repo.git' not found"
+        "fetch",
+        128,
+        stderr="fatal: repository 'https://oauth2:s3cr3t@github.com/org/repo.git' not found",
     )
 
     log_messages = []
@@ -365,8 +364,8 @@ def test_fetch_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_apply_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = MagicMock()
-    repo.git.pull.side_effect = GitCommandError(
-        "pull", 128, stderr="ERROR: https://oauth2:t0ken@github.com/org/repo.git permission denied"
+    repo.git.fetch.side_effect = GitCommandError(
+        "fetch", 128, stderr="ERROR: https://oauth2:t0ken@github.com/org/repo.git permission denied"
     )
 
     log_messages = []
@@ -379,7 +378,9 @@ def test_apply_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:
     assert all("t0ken" not in m for m in log_messages)
 
 
-def test_ensure_repo_clone_log_sanitizes_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ensure_repo_clone_log_sanitizes_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     cloned_path = tmp_path / "repo"
 
     log_messages = []
@@ -453,7 +454,8 @@ def test_sync_repo_pulls_branch_when_remote_ahead(monkeypatch: pytest.MonkeyPatc
     result = steward.sync_repo(repo, steward.AppRef(branch="main"))
 
     assert result is True
-    repo.git.pull.assert_called_once_with("origin", "main")
+    repo.git.fetch.assert_any_call("origin", "main")
+    repo.git.merge.assert_called_once_with("--ff-only", "origin/main")
 
 
 def test_sync_repo_checks_out_tag_when_remote_ahead(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -471,7 +473,7 @@ def test_sync_repo_checks_out_tag_when_remote_ahead(monkeypatch: pytest.MonkeyPa
 def test_sync_repo_returns_none_when_pull_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     repo = MagicMock()
     repo.head.commit.hexsha = "abc123"
-    repo.git.pull.side_effect = GitCommandError("pull", 1, stderr="boom")
+    repo.git.fetch.side_effect = GitCommandError("fetch", 1, stderr="boom")
 
     monkeypatch.setattr(steward, "get_remote_sha", lambda _repo, _ref: "def456")
 
@@ -776,7 +778,9 @@ def test_reconcile_app_sets_synced_status_when_up_to_date(monkeypatch: pytest.Mo
     assert state["apps"]["demo"]["health_status"] == "Healthy"
 
 
-def test_reconcile_app_sets_unknown_status_on_fetch_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_app_sets_unknown_status_on_fetch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
@@ -802,7 +806,9 @@ def test_reconcile_app_sets_unknown_status_on_fetch_failure(monkeypatch: pytest.
     assert state["apps"]["demo"]["health_status"] == "Unknown"
 
 
-def test_sqlite_state_roundtrip_includes_sync_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sqlite_state_roundtrip_includes_sync_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(steward, "DB_FILE", tmp_path / "steward.db")
 
     state = {
@@ -868,7 +874,9 @@ def test_evaluate_health_status_progressing_when_delay_not_elapsed() -> None:
     assert status == "Progressing"
 
 
-def test_evaluate_health_status_degraded_manual_no_auto_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_evaluate_health_status_degraded_manual_no_auto_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
@@ -904,7 +912,9 @@ def test_evaluate_health_status_degraded_manual_no_auto_apply(monkeypatch: pytes
     assert run_called["value"] is False
 
 
-def test_evaluate_health_status_degraded_auto_attempts_apply(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_evaluate_health_status_degraded_auto_attempts_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
@@ -956,7 +966,9 @@ def test_detect_live_drift_missing_service(monkeypatch: pytest.MonkeyPatch) -> N
     assert "db:missing" in reason
 
 
-def test_load_expected_services_passes_compose_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_expected_services_passes_compose_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("VAR=1\n")
     compose_file = tmp_path / "docker-compose.yml"
@@ -995,7 +1007,9 @@ def test_load_expected_services_passes_compose_env_file(tmp_path: Path, monkeypa
     assert calls[0].index("--env-file") < calls[0].index("config")
 
 
-def test_load_compose_services_status_passes_compose_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_load_compose_services_status_passes_compose_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("VAR=1\n")
     compose_file = tmp_path / "docker-compose.yml"
@@ -1034,7 +1048,9 @@ def test_load_compose_services_status_passes_compose_env_file(tmp_path: Path, mo
     assert calls[0].index("--env-file") < calls[0].index("ps")
 
 
-def test_reconcile_app_synced_drift_manual_logs_skipped_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_app_synced_drift_manual_logs_skipped_operation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
@@ -1062,11 +1078,17 @@ def test_reconcile_app_synced_drift_manual_logs_skipped_operation(monkeypatch: p
             remote_sha="abc123",
         ),
     )
-    monkeypatch.setattr(steward, "_detect_live_drift", lambda _app, _stack: (True, "live_drift_detected[db:missing]"))
+    monkeypatch.setattr(
+        steward,
+        "_detect_live_drift",
+        lambda _app, _stack: (True, "live_drift_detected[db:missing]"),
+    )
     monkeypatch.setattr(steward, "_evaluate_health_status", lambda _app, _stack, _state: "Degraded")
 
     sent: list[tuple[str, dict]] = []
-    monkeypatch.setattr(steward, "_send_notification", lambda _app, event, payload: sent.append((event, payload)))
+    monkeypatch.setattr(
+        steward, "_send_notification", lambda _app, event, payload: sent.append((event, payload))
+    )
 
     result = steward.reconcile_app(app, state)
 
@@ -1105,7 +1127,11 @@ def test_reconcile_app_synced_drift_auto_self_heals(monkeypatch: pytest.MonkeyPa
             remote_sha="abc123",
         ),
     )
-    monkeypatch.setattr(steward, "_detect_live_drift", lambda _app, _stack: (True, "live_drift_detected[db:missing]"))
+    monkeypatch.setattr(
+        steward,
+        "_detect_live_drift",
+        lambda _app, _stack: (True, "live_drift_detected[db:missing]"),
+    )
     monkeypatch.setattr(steward, "run_compose", lambda _app, _stack: True)
 
     result = steward.reconcile_app(app, state)
@@ -1117,7 +1143,9 @@ def test_reconcile_app_synced_drift_auto_self_heals(monkeypatch: pytest.MonkeyPa
     assert state["_operations"][0]["trigger"] == "self_heal"
 
 
-def test_reconcile_app_synced_expected_services_unavailable_reports_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_app_synced_expected_services_unavailable_reports_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
@@ -1157,7 +1185,9 @@ def test_reconcile_app_synced_expected_services_unavailable_reports_unknown(monk
     assert state["apps"]["demo"]["reconcile_total"]["failed"] == 1
 
 
-def test_reconcile_app_synced_live_state_unavailable_reports_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_app_synced_live_state_unavailable_reports_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = steward.AppManifest(
         version=2,
         name="demo",
@@ -1185,7 +1215,9 @@ def test_reconcile_app_synced_live_state_unavailable_reports_unknown(monkeypatch
             remote_sha="abc123",
         ),
     )
-    monkeypatch.setattr(steward, "_detect_live_drift", lambda _app, _stack: (False, "live_state_unavailable"))
+    monkeypatch.setattr(
+        steward, "_detect_live_drift", lambda _app, _stack: (False, "live_state_unavailable")
+    )
 
     result = steward.reconcile_app(app, state)
 
@@ -1224,10 +1256,16 @@ def test_sync_failure_sends_notification(monkeypatch: pytest.MonkeyPatch) -> Non
             remote_sha="def456",
         ),
     )
-    monkeypatch.setattr(steward, "sync_app", lambda _app, _repo, _path: steward.SyncResult(success=False, message="compose_failed"))
+    monkeypatch.setattr(
+        steward,
+        "sync_app",
+        lambda _app, _repo, _path: steward.SyncResult(success=False, message="compose_failed"),
+    )
 
     sent: list[str] = []
-    monkeypatch.setattr(steward, "_send_notification", lambda _app, event, payload: sent.append(event))
+    monkeypatch.setattr(
+        steward, "_send_notification", lambda _app, event, payload: sent.append(event)
+    )
 
     result = steward.reconcile_app(app, state)
 
@@ -1407,7 +1445,6 @@ def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
     monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
     monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([disabled_app], []))
-    monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: True)
 
     result = steward.reconcile()
 
@@ -1415,7 +1452,7 @@ def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) ->
     assert saved["apps"]["demo"]["sync_status"] == "Disabled"
 
 
-def test_reconcile_returns_partial_failure_when_status_writeback_fails(
+def test_reconcile_never_commits_or_pushes_to_control_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     disabled_app = steward.AppManifest(
@@ -1430,62 +1467,82 @@ def test_reconcile_returns_partial_failure_when_status_writeback_fails(
         source_file=Path("/tmp/app.yml"),
     )
 
-    class _FakeRepo:
-        working_dir = "/tmp/control"
-
-        def close(self) -> None:
-            pass
-
-    saved: dict = {}
+    control_repo = MagicMock()
+    control_repo.working_dir = "/tmp/control"
 
     monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
     monkeypatch.setattr(steward, "_load_metrics_state", lambda: {"node": steward.GITOPS_NODE_NAME})
-    monkeypatch.setattr(steward, "_save_metrics_state", lambda state: saved.update(state))
-    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
+    monkeypatch.setattr(steward, "_save_metrics_state", lambda _state: None)
+    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: control_repo)
     monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
     monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([disabled_app], []))
-    monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: False)
 
     result = steward.reconcile()
 
-    assert result == 1
-    assert saved["reconcile"]["total"]["partial_failure"] == 1
+    assert result == 0
+    # steward must never write to the control repo (GitOps: git holds desired state only).
+    assert control_repo.index.add.call_count == 0
+    assert control_repo.index.commit.call_count == 0
+    assert control_repo.git.push.call_count == 0
 
 
-def test_write_status_snapshot_commits_only_when_changed(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def _commit_file(repo: Repo, name: str, content: str, message: str) -> str:
+    file_path = Path(repo.working_dir) / name
+    file_path.write_text(content)
+    repo.index.add([name])
+    return repo.index.commit(message).hexsha
+
+
+def _make_upstream_and_clone(tmp_path: Path) -> tuple[Repo, Repo]:
+    upstream_path = tmp_path / "upstream"
+    upstream = Repo.init(upstream_path, initial_branch="main")
+    with upstream.config_writer() as cw:
+        cw.set_value("user", "name", "Test")
+        cw.set_value("user", "email", "test@example.com")
+    _commit_file(upstream, "file.txt", "A\n", "commit A")
+
+    local_path = tmp_path / "local"
+    local = Repo.clone_from(str(upstream_path), str(local_path))
+    with local.config_writer() as cw:
+        cw.set_value("user", "name", "Test")
+        cw.set_value("user", "email", "test@example.com")
+    return upstream, local
+
+
+def test_apply_ref_fast_forwards_when_branch_is_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    working_dir = tmp_path / "control"
-    repo = MagicMock()
-    repo.working_dir = str(working_dir)
+    upstream, local = _make_upstream_and_clone(tmp_path)
+    new_sha = _commit_file(upstream, "file.txt", "B\n", "commit B")
 
-    monkeypatch.setattr(steward, "GITOPS_NODE_NAME", "node-a")
-    monkeypatch.setattr(steward, "CONTROL_REPO_BRANCH", "main")
+    warnings: list[str] = []
+    monkeypatch.setattr(steward.log, "warning", lambda msg, *args: warnings.append(msg % args))
 
-    state = {
-        "apps": {
-            "demo": {
-                "sync_status": "Synced",
-                "health_status": "Healthy",
-                "deployed_sha": "abc",
-                "remote_sha": "abc",
-            }
-        }
-    }
+    result = steward.apply_ref(local, steward.AppRef(branch="main"))
 
-    assert steward._write_status_snapshot(repo, state) is True
-    assert repo.index.commit.call_count == 1
-    assert repo.git.push.call_count == 1
+    assert result is True
+    # Fast-forwarded to the remote tip without a hard reset (no divergence warning).
+    assert local.head.commit.hexsha == new_sha
+    assert warnings == []
 
-    assert steward._write_status_snapshot(repo, state) is True
-    assert repo.index.commit.call_count == 1
-    assert repo.git.push.call_count == 1
 
-    status_file = working_dir / "nodes" / "node-a" / "status.json"
-    payload = json.loads(status_file.read_text())
-    assert payload["node"] == "node-a"
-    assert payload["apps"]["demo"]["sync_status"] == "Synced"
+def test_apply_ref_hard_resets_divergent_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upstream, local = _make_upstream_and_clone(tmp_path)
+    upstream_sha = _commit_file(upstream, "file.txt", "B\n", "commit B")
+    local_only_sha = _commit_file(local, "file.txt", "C\n", "local commit C")
+
+    warnings: list[str] = []
+    monkeypatch.setattr(steward.log, "warning", lambda msg, *args: warnings.append(msg % args))
+
+    result = steward.apply_ref(local, steward.AppRef(branch="main"))
+
+    assert result is True
+    # Working copy is forced to the remote tip; the local-only commit is discarded.
+    assert local.head.commit.hexsha == upstream_sha
+    assert local_only_sha not in {c.hexsha for c in local.iter_commits()}
+    assert any("diverged" in m for m in warnings)
 
 
 def test_reconcile_app_auto_sync_respects_global_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1566,7 +1623,11 @@ def test_reconcile_app_synced_drift_auto_self_heal_increments_oob_counter(
             remote_sha="abc123",
         ),
     )
-    monkeypatch.setattr(steward, "_detect_live_drift", lambda _app, _stack: (True, "live_drift_detected[db:missing]"))
+    monkeypatch.setattr(
+        steward,
+        "_detect_live_drift",
+        lambda _app, _stack: (True, "live_drift_detected[db:missing]"),
+    )
     monkeypatch.setattr(steward, "run_compose", lambda _app, _stack: True)
 
     result = steward.reconcile_app(app, state)
@@ -1575,7 +1636,9 @@ def test_reconcile_app_synced_drift_auto_self_heal_increments_oob_counter(
     assert state["apps"]["demo"]["ooband_heal_total"] == 1
 
 
-def test_operation_retention_prunes_old_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_operation_retention_prunes_old_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(steward, "DB_FILE", tmp_path / "steward.db")
 
     old_state = {
@@ -1632,6 +1695,7 @@ def test_operation_retention_prunes_old_rows(tmp_path: Path, monkeypatch: pytest
 # Goal 7 — parse-error visibility in reconcile metrics
 # ---------------------------------------------------------------------------
 
+
 def test_reconcile_parse_error_app_appears_as_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     """A manifest that fails to parse is recorded as 'failed' in results and metrics."""
 
@@ -1653,7 +1717,6 @@ def test_reconcile_parse_error_app_appears_as_failed(monkeypatch: pytest.MonkeyP
         "load_node_manifests",
         lambda _repo: ([], [("steward.yml", "steward", "repo: only SSH URLs are supported")]),
     )
-    monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: True)
 
     result = steward.reconcile()
 
@@ -1665,7 +1728,9 @@ def test_reconcile_parse_error_app_appears_as_failed(monkeypatch: pytest.MonkeyP
     assert saved["reconcile"]["manifest_parse_errors"] == 1
 
 
-def test_reconcile_parse_error_run_result_is_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reconcile_parse_error_run_result_is_partial_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A run with only parse errors records partial_failure, not success."""
 
     class _FakeRepo:
@@ -1692,7 +1757,6 @@ def test_reconcile_parse_error_run_result_is_partial_failure(monkeypatch: pytest
             ],
         ),
     )
-    monkeypatch.setattr(steward, "_write_status_snapshot", lambda _repo, _state: True)
 
     result = steward.reconcile()
 

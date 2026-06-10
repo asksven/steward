@@ -7,5 +7,5 @@ Phase	Items	Status	Notes
 4	2.4, 3.2	complete	Manifest v2 plus pull_policy landed together as planned.
 5	1.1 -> 1.3 -> 1.2	complete	Sync status, sync policy, and health status lifecycle are implemented.
 6	1.4, 1.5, 3.3	complete	Live drift self-heal, operation history, and notifications are implemented.
-7	2.1, 2.2	complete	Status writeback, partial-failure behavior, and dry-run/oob contract are implemented.
+7	2.1, 2.2	complete	Partial-failure behavior and dry-run/oob contract (2.2) are implemented. Status writeback (2.1) was implemented then REMOVED 2026-06-10 (GitOps: git holds desired state only); observed state is exposed via Prometheus + SQLite.
 8	Plan consistency pass	complete	Open-question sections and implementation status tracking normalized in plan.md.

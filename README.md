@@ -67,7 +67,7 @@ Generate a dedicated SSH key for steward (do not reuse `~/.ssh/id_ed25519`):
 ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
 ```
 
-Add `~/.ssh/steward_deploy_key.pub` as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
+Add `~/.ssh/steward_deploy_key.pub` as a **deploy key** to your GitHub/GitLab repos. **Read-only access is sufficient for every repo, including the control repo** — steward only ever reads from git (it never writes observed state back). Granting read-only keeps the deployment least-privilege.
 
 ### 4. Decide how to trust the git host's SSH key
 
@@ -436,6 +436,8 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
 | Node not reporting | `time() - steward_reconcile_last_timestamp_seconds > 300` | critical |
 | App not reconciled | `time() - steward_app_last_reconcile_timestamp_seconds > 300` | warning |
 | Manifest parse error | `increase(steward_manifest_parse_errors_total[5m]) > 0` | warning |
+| Control repo sync failing | `increase(steward_control_repo_sync_total{result="failed"}[15m]) > 0` | warning |
+| Reconcile partial failure | `increase(steward_reconcile_total{result="partial_failure"}[15m]) > 0` | warning |
 
 ---
 
@@ -463,10 +465,13 @@ All metrics carry a `node` label set to `GITOPS_NODE_NAME`.
   │       └── sync_policy: auto
   │           ├── STEWARD_DRY_RUN=true → skip apply, notify drift_detected
   │           └── STEWARD_DRY_RUN=false → git pull/checkout → docker compose --project-name <app.name> up -d --remove-orphans --pull <pull_policy>
-  ├── write observed state snapshot to nodes/<hostname>/status.json in control repo
-  │   └── commit/push only when content changed
    └── log result
 ```
+
+> Steward never writes to the control repo. Observed state (sync/health status,
+> deployed SHAs, operation history) is exposed via the Prometheus `/metrics`
+> endpoint and the local SQLite state store only — git holds *desired* state
+> exclusively.
 
 ### Notifications
 

@@ -8,8 +8,7 @@ RUN apk add --no-cache \
     docker-cli=~29 \
     docker-cli-compose=~2 \
     openssh-client=~10 \
-    su-exec=~0.3 \
-    tini=~0.19 && \
+    su-exec=~0.3 && \
     pip install --no-cache-dir "uv==${UV_VERSION}"
 
 WORKDIR /app

@@ -26,7 +26,7 @@ from git import GitCommandError, InvalidGitRepositoryError, Repo
 from state_store import load_state as load_sqlite_state
 from state_store import save_state as save_sqlite_state
 
-_EMBEDDED_CREDENTIALS_RE = re.compile(r'(https?://)([^:@\s]+:[^@\s]+@)')
+_EMBEDDED_CREDENTIALS_RE = re.compile(r"(https?://)([^:@\s]+:[^@\s]+@)")
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -51,12 +51,15 @@ AGENT_CONTAINER_NAME = os.environ.get("AGENT_CONTAINER_NAME", "steward")
 # Path helpers (inside ↔ outside)
 # ---------------------------------------------------------------------------
 
+
 def _container_mounts() -> list[dict]:
     """Return the Mounts list from docker inspect on this container, or []."""
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{json .Mounts}}", AGENT_CONTAINER_NAME],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return json.loads(result.stdout) or []
@@ -127,6 +130,7 @@ def log_mounts() -> None:
 # Metrics helpers
 # ---------------------------------------------------------------------------
 
+
 def strip_url_credentials(url: str) -> str:
     """Remove embedded credentials from a URL or any string containing HTTPS URLs.
 
@@ -141,7 +145,7 @@ def strip_url_credentials(url: str) -> str:
     except Exception:
         pass
     # Fallback: strip user:pass@ from any HTTPS URL embedded in a longer string
-    return _EMBEDDED_CREDENTIALS_RE.sub(r'\1', url)
+    return _EMBEDDED_CREDENTIALS_RE.sub(r"\1", url)
 
 
 def is_ssh_url(url: str) -> bool:
@@ -217,15 +221,20 @@ def _inc(d: dict, *keys, by: int = 1) -> None:
 # Configuration (from environment)
 # ---------------------------------------------------------------------------
 
-GITOPS_ROOT         = Path(os.environ.get("GITOPS_ROOT", Path.home() / "git"))
-GITOPS_NODE_NAME    = os.environ.get("GITOPS_NODE_NAME", socket.gethostname())
-CONTROL_REPO_URL    = os.environ.get("CONTROL_REPO_URL", "")
+GITOPS_ROOT = Path(os.environ.get("GITOPS_ROOT", Path.home() / "git"))
+GITOPS_NODE_NAME = os.environ.get("GITOPS_NODE_NAME", socket.gethostname())
+CONTROL_REPO_URL = os.environ.get("CONTROL_REPO_URL", "")
 CONTROL_REPO_BRANCH = os.environ.get("CONTROL_REPO_BRANCH", "main")
-CONTROL_REPO_DIR    = GITOPS_ROOT / "control"
-STACKS_DIR          = GITOPS_ROOT / "stacks"
-DB_FILE             = GITOPS_ROOT / "steward.db"
-STEWARD_NOTIFY_URL  = os.environ.get("STEWARD_NOTIFY_URL", "")
-STEWARD_DRY_RUN     = os.environ.get("STEWARD_DRY_RUN", "false").strip().lower() in {"1", "true", "yes", "on"}
+CONTROL_REPO_DIR = GITOPS_ROOT / "control"
+STACKS_DIR = GITOPS_ROOT / "stacks"
+DB_FILE = GITOPS_ROOT / "steward.db"
+STEWARD_NOTIFY_URL = os.environ.get("STEWARD_NOTIFY_URL", "")
+STEWARD_DRY_RUN = os.environ.get("STEWARD_DRY_RUN", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 LEGACY_METRICS_STATE_FILE = GITOPS_ROOT / "metrics" / "state.json"
 LEGACY_NOTICE_MARKER_FILE = GITOPS_ROOT / "metrics" / ".legacy_json_ignored"
 
@@ -246,14 +255,14 @@ STEWARD_CREDENTIALS_FILE = os.environ.get("STEWARD_CREDENTIALS_FILE", "/app/cred
 
 @dataclass
 class CredentialEntry:
-    pattern: str      # glob pattern matched against the git host (e.g. "github.com", "*.internal")
-    key_file: str     # path to the SSH private key file (e.g. /run/secrets/github_key)
+    pattern: str  # glob pattern matched against the git host (e.g. "github.com", "*.internal")
+    key_file: str  # path to the SSH private key file (e.g. /run/secrets/github_key)
 
 
 @dataclass
 class CredentialsConfig:
     credentials: list[CredentialEntry]
-    known_hosts_file: Optional[str] = None   # optional path to a known_hosts file
+    known_hosts_file: Optional[str] = None  # optional path to a known_hosts file
 
 
 def parse_credentials_file(path: str) -> CredentialsConfig:
@@ -288,7 +297,9 @@ def parse_credentials_file(path: str) -> CredentialsConfig:
             log.warning(
                 "credentials[%d]: pattern '%s' contains path components; "
                 "SSH Host matching uses hostname only — consider using just '%s'",
-                i, pattern, pattern.split("/")[0],
+                i,
+                pattern,
+                pattern.split("/")[0],
             )
         entries.append(CredentialEntry(pattern=pattern, key_file=key_file))
 
@@ -299,7 +310,9 @@ def parse_credentials_file(path: str) -> CredentialsConfig:
     return CredentialsConfig(credentials=entries, known_hosts_file=known_hosts_file or None)
 
 
-def generate_ssh_config(config: CredentialsConfig, strict_host_key_checking: str = "accept-new") -> str:
+def generate_ssh_config(
+    config: CredentialsConfig, strict_host_key_checking: str = "accept-new"
+) -> str:
     """Generate the text content of an ~/.ssh/config file from a CredentialsConfig.
 
     Each credential entry produces one Host block. A trailing global Host * block
@@ -438,61 +451,11 @@ def _send_notification(app: AppManifest, event: str, payload: dict) -> None:
     try:
         with request.urlopen(req, timeout=10) as resp:
             if resp.status >= 400:
-                log.warning("Notification endpoint returned HTTP %s for app '%s'", resp.status, app.name)
+                log.warning(
+                    "Notification endpoint returned HTTP %s for app '%s'", resp.status, app.name
+                )
     except (error.URLError, TimeoutError, ValueError) as e:
         log.warning("Notification send failed for app '%s': %s", app.name, e)
-
-
-def _ts_to_iso(ts: Optional[float]) -> Optional[str]:
-    if ts is None:
-        return None
-    try:
-        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(ts)))
-    except (TypeError, ValueError):
-        return None
-
-
-def _build_status_snapshot(state: dict) -> dict:
-    apps_payload: dict[str, dict] = {}
-    for app_name, app_state in sorted(state.get("apps", {}).items()):
-        apps_payload[app_name] = {
-            "sync_status": app_state.get("sync_status", SyncStatus.UNKNOWN.value),
-            "health_status": app_state.get("health_status", HEALTH_STATUS_UNKNOWN),
-            "deployed_sha": app_state.get("deployed_sha"),
-            "remote_sha": app_state.get("remote_sha"),
-            "last_synced_at": _ts_to_iso(app_state.get("last_sync_timestamp")),
-        }
-
-    return {
-        "node": GITOPS_NODE_NAME,
-        "updated_at": _now_iso(),
-        "apps": apps_payload,
-    }
-
-
-def _write_status_snapshot(control_repo: Repo, state: dict) -> bool:
-    """Write nodes/<hostname>/status.json and push only when content changed."""
-    status_rel = Path("nodes") / GITOPS_NODE_NAME / "status.json"
-    status_abs = Path(control_repo.working_dir) / status_rel
-    status_abs.parent.mkdir(parents=True, exist_ok=True)
-
-    snapshot = _build_status_snapshot(state)
-    rendered = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
-    current = status_abs.read_text() if status_abs.exists() else None
-
-    if current == rendered:
-        return True
-
-    status_abs.write_text(rendered)
-
-    try:
-        control_repo.index.add([str(status_rel)])
-        control_repo.index.commit(f"steward: update status for {GITOPS_NODE_NAME}")
-        control_repo.git.push("origin", CONTROL_REPO_BRANCH)
-        return True
-    except (GitCommandError, OSError, PermissionError) as e:
-        log.error("Status writeback failed: %s", e)
-        return False
 
 
 def parse_manifest(manifest_path: Path) -> AppManifest:
@@ -605,7 +568,10 @@ def parse_manifest(manifest_path: Path) -> AppManifest:
 # Git helpers
 # ---------------------------------------------------------------------------
 
-def ensure_repo(url: str, local_path: Path, branch: Optional[str] = None, tag: Optional[str] = None) -> Repo:
+
+def ensure_repo(
+    url: str, local_path: Path, branch: Optional[str] = None, tag: Optional[str] = None
+) -> Repo:
     """Clone repo if it doesn't exist, otherwise return existing repo."""
     if local_path.exists():
         try:
@@ -615,6 +581,7 @@ def ensure_repo(url: str, local_path: Path, branch: Optional[str] = None, tag: O
         except InvalidGitRepositoryError:
             log.warning("Directory %s exists but is not a git repo, re-cloning", local_path)
             import shutil
+
             shutil.rmtree(local_path)
 
     log.info("Cloning %s → %s", strip_url_credentials(url), local_path)
@@ -647,9 +614,7 @@ def get_remote_sha(repo: Repo, ref: AppRef) -> Optional[str]:
             return repo.remotes.origin.refs[ref.branch].commit.hexsha
         elif ref.tag:
             # Resolve tag to commit SHA
-            tag_ref = next(
-                (t for t in repo.tags if t.name == ref.tag), None
-            )
+            tag_ref = next((t for t in repo.tags if t.name == ref.tag), None)
             if tag_ref is None:
                 log.error("Tag %s not found in repo", ref.tag)
                 return None
@@ -682,10 +647,35 @@ def check_app(repo: Repo, ref: AppRef) -> CheckResult:
 
 
 def apply_ref(repo: Repo, ref: AppRef) -> bool:
-    """Apply remote changes for a branch/tag to local working tree."""
+    """Apply remote changes for a branch/tag to the local working tree.
+
+    For branch refs the working copy is forced to converge on ``origin/<branch>``:
+    a fast-forward when the local branch is simply behind, otherwise a hard reset
+    that discards any local-only commits. Steward treats local working copies as
+    caches of the desired state declared in git — a divergent local commit is
+    never intentional and is always safe to discard. This self-heal keeps a node
+    from wedging on a divergent branch (`git pull` returns exit 128 on git ≥ 2.27).
+    """
     try:
         if ref.branch:
-            repo.git.pull("origin", ref.branch)
+            repo.git.fetch("origin", ref.branch)
+            remote_ref = f"origin/{ref.branch}"
+            try:
+                # Fast-forward only; succeeds when local is an ancestor of remote
+                # (or already up to date). Fails on any divergence.
+                repo.git.merge("--ff-only", remote_ref)
+            except GitCommandError:
+                # Divergent / non-fast-forward: force the working copy back to the
+                # remote tip, discarding local-only commits.
+                abandoned = repo.head.commit.hexsha
+                log.warning(
+                    "Local branch '%s' diverged from %s; hard-resetting and "
+                    "discarding local commit %s",
+                    ref.branch,
+                    remote_ref,
+                    abandoned[:8],
+                )
+                repo.git.reset("--hard", remote_ref)
         elif ref.tag:
             repo.git.checkout(ref.tag)
         return True
@@ -732,6 +722,7 @@ def sync_repo(repo: Repo, ref: AppRef) -> Optional[bool]:
 # Docker Compose helpers
 # ---------------------------------------------------------------------------
 
+
 def _is_self_update(app: AppManifest) -> bool:
     """True when reconciling the steward stack itself — compose up would kill this process."""
     return app.name == AGENT_CONTAINER_NAME
@@ -742,7 +733,9 @@ def _get_helper_image() -> Optional[str]:
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format", "{{.Config.Image}}", AGENT_CONTAINER_NAME],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
@@ -784,9 +777,12 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
         return run_compose(app, stack_path)
 
     inner_parts = [
-        "docker", "compose",
-        "--project-name", shlex.quote(app.name),
-        "-f", shlex.quote(host_compose_file),
+        "docker",
+        "compose",
+        "--project-name",
+        shlex.quote(app.name),
+        "-f",
+        shlex.quote(host_compose_file),
     ]
 
     # Include override file if present so secrets and host-specific settings survive self-update.
@@ -812,22 +808,31 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
                 app.env_file,
             )
     inner_parts += [
-        "up", "-d",
+        "up",
+        "-d",
         "--remove-orphans",
-        "--pull", shlex.quote(app.pull_policy),
+        "--pull",
+        shlex.quote(app.pull_policy),
     ]
 
     inner_cmd = " ".join(inner_parts)
 
     helper_run = [
-        "docker", "run",
-        "--rm", "-d",
-        "--entrypoint", "sh",
-        "-v", "/var/run/docker.sock:/var/run/docker.sock",
-        "-v", f"{host_root}:{host_root}",
-        "-e", "HOME=/tmp",
+        "docker",
+        "run",
+        "--rm",
+        "-d",
+        "--entrypoint",
+        "sh",
+        "-v",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        "-v",
+        f"{host_root}:{host_root}",
+        "-e",
+        "HOME=/tmp",
         helper_image,
-        "-c", f"sleep 5 && timeout 300 {inner_cmd}",
+        "-c",
+        f"sleep 5 && timeout 300 {inner_cmd}",
     ]
 
     log.info("Self-update: spawning helper container (image=%s)", helper_image)
@@ -862,9 +867,12 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
         return False
 
     cmd = [
-        "docker", "compose",
-        "--project-name", app.name,
-        "-f", str(compose_file),
+        "docker",
+        "compose",
+        "--project-name",
+        app.name,
+        "-f",
+        str(compose_file),
     ]
 
     env = os.environ.copy()
@@ -875,7 +883,9 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
         if not env_path.exists():
             log.error(
                 "env_file not found for app '%s' | inside: %s | outside: %s",
-                app.name, env_path, host_path(env_path),
+                app.name,
+                env_path,
+                host_path(env_path),
             )
             return False
         cmd.extend(["--env-file", str(env_path)])
@@ -902,7 +912,9 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
             for line in result.stderr.strip().splitlines():
                 log.warning("[compose/%s] %s", app.name, line)
         if result.returncode != 0:
-            log.error("docker compose exited with code %d for app '%s'", result.returncode, app.name)
+            log.error(
+                "docker compose exited with code %d for app '%s'", result.returncode, app.name
+            )
             return False
         return True
     except subprocess.TimeoutExpired:
@@ -921,9 +933,12 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
         return None
 
     cmd = [
-        "docker", "compose",
-        "--project-name", app.name,
-        "-f", str(compose_file),
+        "docker",
+        "compose",
+        "--project-name",
+        app.name,
+        "-f",
+        str(compose_file),
     ]
     if app.env_file:
         env_path = Path(app.env_file)
@@ -945,7 +960,9 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
             timeout=60,
         )
         if result.returncode != 0:
-            log.warning("docker compose ps failed for app '%s': %s", app.name, result.stderr.strip())
+            log.warning(
+                "docker compose ps failed for app '%s': %s", app.name, result.stderr.strip()
+            )
             return None
 
         raw = result.stdout.strip()
@@ -967,7 +984,9 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
                 try:
                     row = json.loads(line)
                 except json.JSONDecodeError:
-                    log.warning("Unparseable docker compose ps line for app '%s': %s", app.name, line)
+                    log.warning(
+                        "Unparseable docker compose ps line for app '%s': %s", app.name, line
+                    )
                     return None
                 if isinstance(row, dict):
                     rows.append(row)
@@ -987,9 +1006,12 @@ def _load_expected_services(app: AppManifest, stack_path: Path) -> Optional[set[
         return None
 
     cmd = [
-        "docker", "compose",
-        "--project-name", app.name,
-        "-f", str(compose_file),
+        "docker",
+        "compose",
+        "--project-name",
+        app.name,
+        "-f",
+        str(compose_file),
     ]
     if app.env_file:
         env_path = Path(app.env_file)
@@ -1011,7 +1033,11 @@ def _load_expected_services(app: AppManifest, stack_path: Path) -> Optional[set[
             timeout=60,
         )
         if result.returncode != 0:
-            log.warning("docker compose config --services failed for app '%s': %s", app.name, result.stderr.strip())
+            log.warning(
+                "docker compose config --services failed for app '%s': %s",
+                app.name,
+                result.stderr.strip(),
+            )
             return None
 
         services = {line.strip() for line in result.stdout.splitlines() if line.strip()}
@@ -1119,6 +1145,7 @@ def sync_app(app: AppManifest, repo: Repo, stack_path: Path) -> SyncResult:
 # Main reconciliation loop
 # ---------------------------------------------------------------------------
 
+
 def load_node_manifests(
     control_repo: Repo,
 ) -> tuple[list[AppManifest], list[tuple[str, str, str]]]:
@@ -1171,14 +1198,16 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
     log.debug("App '%s' | outside stack_path: %s", app.name, host_path(stack_path))
 
     app_state = state.setdefault("apps", {}).setdefault(app.name, {})
-    app_state.update({
-        "repo": strip_url_credentials(app.repo),
-        "ref": app.ref.branch or app.ref.tag or "",
-        "ref_type": "branch" if app.ref.branch else "tag",
-        "sync_policy": app.sync_policy,
-        "health_check_delay_seconds": app.health_check_delay_seconds,
-        "enabled": app.enabled,
-    })
+    app_state.update(
+        {
+            "repo": strip_url_credentials(app.repo),
+            "ref": app.ref.branch or app.ref.tag or "",
+            "ref_type": "branch" if app.ref.branch else "tag",
+            "sync_policy": app.sync_policy,
+            "health_check_delay_seconds": app.health_check_delay_seconds,
+            "enabled": app.enabled,
+        }
+    )
     app_state["last_reconcile_timestamp"] = time.time()
 
     # Ensure stack repo is cloned
@@ -1232,7 +1261,10 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
                 app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
 
                 if app.sync_policy == "manual":
-                    log.info("App '%s' has live drift but sync_policy=manual, skipping self-heal", app.name)
+                    log.info(
+                        "App '%s' has live drift but sync_policy=manual, skipping self-heal",
+                        app.name,
+                    )
                     app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
                     _inc(app_state, "reconcile_total", "skipped")
                     _append_operation(
@@ -1259,7 +1291,9 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
                     )
                     return True
 
-                log.warning("App '%s' has live drift, attempting self-heal: %s", app.name, drift_reason)
+                log.warning(
+                    "App '%s' has live drift, attempting self-heal: %s", app.name, drift_reason
+                )
                 if STEWARD_DRY_RUN:
                     app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
                     _inc(app_state, "reconcile_total", "skipped")
@@ -1287,7 +1321,11 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
                     )
                     return True
 
-                healed = spawn_compose_helper(app, stack_path) if _is_self_update(app) else run_compose(app, stack_path)
+                healed = (
+                    spawn_compose_helper(app, stack_path)
+                    if _is_self_update(app)
+                    else run_compose(app, stack_path)
+                )
                 _inc(app_state, "sync_total", "success" if healed else "failed")
                 _append_operation(
                     state,
@@ -1354,7 +1392,9 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
         )
 
         if app.sync_policy == "manual":
-            log.info("App '%s' is out of sync, but sync_policy=manual so apply is skipped", app.name)
+            log.info(
+                "App '%s' is out of sync, but sync_policy=manual so apply is skipped", app.name
+            )
             app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
             app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
             _inc(app_state, "reconcile_total", "skipped")
@@ -1383,7 +1423,9 @@ def reconcile_app(app: AppManifest, state: dict) -> bool:
             return True
 
         if STEWARD_DRY_RUN:
-            log.info("App '%s' is out of sync, but STEWARD_DRY_RUN=true so apply is skipped", app.name)
+            log.info(
+                "App '%s' is out of sync, but STEWARD_DRY_RUN=true so apply is skipped", app.name
+            )
             app_state["sync_status"] = SyncStatus.OUT_OF_SYNC.value
             app_state["health_status"] = _evaluate_health_status(app, stack_path, app_state)
             _inc(app_state, "reconcile_total", "skipped")
@@ -1527,12 +1569,14 @@ def reconcile() -> int:
     # Treat parse-error apps as failed so they appear in metrics and alerts.
     for _filename, app_name, _err_msg in parse_error_entries:
         app_state = state.setdefault("apps", {}).setdefault(app_name, {})
-        app_state.update({
-            "enabled": True,
-            "sync_status": SyncStatus.UNKNOWN.value,
-            "health_status": HEALTH_STATUS_UNKNOWN,
-            "last_reconcile_timestamp": time.time(),
-        })
+        app_state.update(
+            {
+                "enabled": True,
+                "sync_status": SyncStatus.UNKNOWN.value,
+                "health_status": HEALTH_STATUS_UNKNOWN,
+                "last_reconcile_timestamp": time.time(),
+            }
+        )
         _inc(app_state, "reconcile_total", "failed")
         results[app_name] = "failed"
 
@@ -1540,15 +1584,17 @@ def reconcile() -> int:
         if not app.enabled:
             log.info("App '%s' is disabled, skipping", app.name)
             app_state = state.setdefault("apps", {}).setdefault(app.name, {})
-            app_state.update({
-                "repo": strip_url_credentials(app.repo),
-                "ref": app.ref.branch or app.ref.tag or "",
-                "ref_type": "branch" if app.ref.branch else "tag",
-                "sync_policy": app.sync_policy,
-                "enabled": False,
-                "sync_status": SYNC_STATUS_DISABLED,
-                "health_status": HEALTH_STATUS_UNKNOWN,
-            })
+            app_state.update(
+                {
+                    "repo": strip_url_credentials(app.repo),
+                    "ref": app.ref.branch or app.ref.tag or "",
+                    "ref_type": "branch" if app.ref.branch else "tag",
+                    "sync_policy": app.sync_policy,
+                    "enabled": False,
+                    "sync_status": SYNC_STATUS_DISABLED,
+                    "health_status": HEALTH_STATUS_UNKNOWN,
+                }
+            )
             _inc(app_state, "reconcile_total", "skipped")
             results[app.name] = "disabled"
             continue
@@ -1563,15 +1609,12 @@ def reconcile() -> int:
             success = False
         results[app.name] = "ok" if success else "failed"
 
-    # Step 4: write observed status snapshot back to control repo
-    status_write_ok = _write_status_snapshot(control_repo, state)
+    # Observed state is exposed via Prometheus + SQLite only; steward never writes
+    # back to the control repo (see plan.md "drop git status writeback").
     try:
         control_repo.close()
     except Exception:
         pass
-    if not status_write_ok:
-        log.warning("Status writeback failed; marking run as partial failure")
-        results["_status_writeback"] = "failed"
 
     # Summary
     failed = [name for name, status in results.items() if status == "failed"]
