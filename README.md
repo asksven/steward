@@ -69,7 +69,27 @@ ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)
 
 Add `~/.ssh/steward_deploy_key.pub` as a **deploy key** to your GitHub/GitLab repos (read-only is sufficient for app repos; the control repo needs write access for status writeback).
 
-### 4. Create `docker-compose.override.yml`
+### 4. Decide how to trust the git host's SSH key
+
+  Before steward can clone over SSH it has to trust the git host's key. There are two options:
+
+  **Option A — trust on first use (default, zero config).** If you do **not** provide a `known_hosts` file, steward uses `StrictHostKeyChecking accept-new`: it trusts and records the host key on the first connection. This is the simplest path and what the single-key Quick Start uses out of the box — no action needed here.
+
+**Option B — pre-populate `known_hosts` (strict checking).** The moment you reference a `known_hosts` file — either the `ssh_known_hosts` secret (single-key setup) or `known_hosts_file` in `credentials.yml` (multi-key setup) — steward switches to `StrictHostKeyChecking yes`. That file **must already contain the host key**, or the clone fails with `Host key verification failed`. Generate it with `ssh-keyscan`:
+
+```bash
+ssh-keyscan -t rsa,ecdsa,ed25519 github.com > ~/.ssh/steward_known_hosts
+```
+
+Add one host per git host you use (e.g. `gitlab.com`, or your self-hosted git server):
+
+```bash
+ssh-keyscan -t rsa,ecdsa,ed25519 gitlab.com >> ~/.ssh/steward_known_hosts
+```
+
+> **Rule of thumb:** only reference a `known_hosts` file if you populate it. If you reference it but leave it empty (or missing the host you clone from), every clone fails with `Host key verification failed`. When in doubt, use Option A.
+
+### 5. Create `docker-compose.override.yml`
 
 Copy the example and update the key path:
 
@@ -81,13 +101,29 @@ Edit `docker-compose.override.yml` and replace `/home/you/.ssh/steward_deploy_ke
 
 For setups with keys across multiple git hosts (e.g. GitHub + GitLab), see [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys) below.
 
-### 5. Start the agent
+### 6. Start the agent
 
 ```bash
 docker compose up -d
 ```
 
 The agent reconciles immediately on startup, then runs on the cron schedule.
+
+### 7. Validate your setup
+
+From the deployment directory (the one holding `.env`, `credentials.yml` and
+`docker-compose.override.yml`), run the diagnostic script. It checks your host
+config and the running container, then prints a pass / warn / fail summary:
+
+```bash
+/path/to/steward/scripts/doctor.sh
+```
+
+It catches the misconfigurations that otherwise cost hours of debugging — a wrong
+host in `CONTROL_REPO_URL` (e.g. `github.com` where `gitlab.com` was meant), an
+empty or mismatched `known_hosts`, or a missing deploy key — and performs a live
+`git ls-remote` against the control repo so you know SSH actually works. It exits
+non-zero if any check fails.
 
 ---
 
@@ -103,7 +139,10 @@ credentials:
     key_file: /run/secrets/github_key
   - pattern: gitlab.com
     key_file: /run/secrets/gitlab_key
-known_hosts_file: /run/secrets/ssh_known_hosts   # optional
+# Optional. If set, steward enforces StrictHostKeyChecking=yes and this file
+# MUST contain the host key for every git host above (see Quick start step 4).
+# Remove this line to use accept-new (trust on first use) instead.
+known_hosts_file: /run/secrets/ssh_known_hosts
 ```
 
 **2. Edit `docker-compose.override.yml`** — uncomment Option B in the file (or use the commented block in `docker-compose.override.yml.example` as reference).
@@ -263,6 +302,80 @@ Set `LOGLEVEL=DEBUG` in your `.env` to enable verbose path diagnostics. At DEBUG
 ```env
 LOGLEVEL=DEBUG
 ```
+
+---
+
+## Troubleshooting
+
+### `Host key verification failed`
+
+Full error, e.g.:
+
+```
+No ED25519 host key is known for github.com and you have requested strict checking.
+Host key verification failed.
+```
+
+**Cause:** a `known_hosts` file is referenced (the `ssh_known_hosts` secret, or `known_hosts_file` in `credentials.yml`), which forces `StrictHostKeyChecking yes` — but the file is empty or missing the key for the host steward is cloning from.
+
+**Fix — pick one:**
+
+- Populate the `known_hosts` file with the host's key, then restart:
+  ```bash
+  ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/steward_known_hosts
+  ```
+- Or stop referencing it (remove `known_hosts_file` from `credentials.yml`, or drop the `ssh_known_hosts` secret) to fall back to `accept-new`.
+
+**Diagnose inside the container:**
+
+The quickest check is `scripts/doctor.sh`, which resolves the effective SSH
+config and verifies the host key automatically. To inspect manually, note that
+`docker exec` defaults to **root** (so `~` is `/root`), but steward runs as a
+non-root user with `HOME=/home/steward` — read the config from there:
+
+```bash
+# StrictHostKeyChecking value + which key/known_hosts apply (fall back to /root
+# if steward runs as root):
+docker exec steward sh -c 'cat /home/steward/.ssh/config 2>/dev/null || cat /root/.ssh/config'
+```
+
+With `credentials.yml`, the known_hosts file lives at the path in
+`UserKnownHostsFile` (the secret path, **not** `~/.ssh/known_hosts`). Resolve it
+and confirm it has the control-repo host key:
+
+```bash
+# Replace gitlab.com with your control-repo host (see CONTROL_REPO_URL):
+docker exec steward sh -c 'ssh -G gitlab.com | awk "\$1==\"userknownhostsfile\"{print \$2; exit}"'
+docker exec steward sh -c 'ssh-keygen -F gitlab.com -f /run/secrets/ssh_known_hosts'
+```
+
+---
+
+### `Permission denied (publickey)`
+
+Full error, e.g.:
+
+```
+git@gitlab.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+```
+
+This appears **after** host-key trust passes, so it is easy to misread as a key
+problem when the real cause is a wrong host. Common causes:
+
+- **Wrong host / typo in `CONTROL_REPO_URL`** — e.g. `git@github.com:...` where
+  the repo lives on `gitlab.com`. The deploy key is unknown on the wrong host,
+  so it returns `Permission denied`. Run `scripts/doctor.sh`; it echoes the
+  resolved host explicitly.
+- **Deploy key not registered** with the repo (or lacking access). Add the
+  public key as a deploy key on the repo.
+- **Don't test with `ssh -T git@host`** — deploy keys are repo-scoped and always
+  return `Permission denied (publickey)` even on a working node. Test with
+  `git ls-remote <repo-url>` instead (which is exactly what `doctor.sh` does):
+  ```bash
+  docker exec -u "$(docker exec steward printenv STEWARD_UID)" \
+    -e HOME=/home/steward steward git ls-remote "$(docker exec steward printenv CONTROL_REPO_URL)"
+  ```
 
 ---
 

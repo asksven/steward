@@ -36,8 +36,8 @@ the "like ArgoCD" claim.
 **Proposed solution:** After each reconcile cycle, persist the sync status for every app in
 `STEWARD_DATA_DIR/steward.db` (SQLite — see item 3.1). Expose it as a Prometheus metric label
 `steward_app_sync_status{app, node, status}` (gauge, value always 1, one series per status).
-Write the current status for all apps to `nodes/<hostname>/status.json` in the control repo
-after each cycle (see item 2.1).
+Observed state is surfaced via Prometheus + SQLite only — it is **not** written back to the
+control repo (item 2.1 was removed; see its entry for rationale).
 
 **Open questions:** resolved.
 - What is the correct `OutOfSync` definition when `sync_policy: manual` is set (item 1.3)?
@@ -55,12 +55,14 @@ after each cycle (see item 2.1).
 **Implementation status:**
 - Steward now persists per-app sync status in SQLite (`Synced`, `OutOfSync`, `Unknown`, `Disabled`).
 - `/metrics` now exposes `steward_app_sync_status{app,node,status}` as a one-hot gauge per status label.
-- Remaining part for full 1.1 parity: control-repo status writeback (`nodes/<hostname>/status.json`) from item 2.1.
+- Item 1.1 is considered complete: observed sync state is exposed via Prometheus + SQLite. The
+  former "remaining part" (control-repo status writeback via item 2.1) was removed by the
+  2026-06-10 GitOps write-path decision and is no longer part of 1.1's scope.
 
-**Complexity:** Medium — requires items 3.1 (SQLite state) and 2.1 (status writeback) as
-foundations, but the status logic itself is straightforward once those exist.
+**Complexity:** Medium — requires item 3.1 (SQLite state) as a foundation, but the status logic
+itself is straightforward once that exists.
 
-**Depends on:** 2.1, 3.1
+**Depends on:** 3.1
 
 ---
 
@@ -284,80 +286,31 @@ subtle correctness problems that will compound as steward matures.
 
 ---
 
-### 2.1 Observed state writeback to control repo
+### 2.1 Observed state writeback to control repo — REMOVED (2026-06-10)
 
-**GitOps principle:** Git is the single source of truth for both desired state _and_ observed
-state. A pure GitOps system writes its observed state back to the same repo so the repo is a
-complete picture of the fleet at any point in time.
+**Status: removed.** This feature was implemented (2026-05-23) and then removed on 2026-06-10
+after it caused a multi-node failure and was found to contradict GitOps principles. See
+"Decision: drop git status writeback" below for the full rationale and removal scope.
 
-**Problem:** The control repo currently holds only desired state (app manifests). There is no
-machine-written record of what is actually running on each node. An operator looking at the
-control repo cannot answer "is node1 actually running arr v1.2.3 right now?" without SSHing to
-the node or checking Grafana.
+**Why it was removed (summary):**
+- **Not a GitOps principle.** The original premise — "a pure GitOps system writes observed state
+  back to the same repo" — is not one of the OpenGitOps principles (declarative, versioned &
+  immutable, pulled, continuously reconciled), all of which concern *desired* state. Git is the
+  source of truth for *what should be*, not *what is*.
+- **The ArgoCD analogy argues against it.** ArgoCD writes `.status` to the Application CRD in
+  **etcd**, surfaced via API/UI/metrics — it never commits status into the git repo.
+- **It broke in production.** With more than one node pushing `nodes/<host>/status.json` to the
+  same `main`, concurrent pushes were rejected (non-fast-forward), leaving a divergent local
+  commit that poisoned the next `git pull` (`exit 128`, divergent branches) and wedged the node.
+- **The conflation was the root cause.** The reconciler mutating the same ref it reads desired
+  state from is exactly what produced the deadlock.
 
-**Proposed solution:** After each reconcile cycle, steward writes a
-`nodes/<hostname>/status.json` file back to the control repo via a git commit + push. This file
-contains the current sync and health status for every app on the node:
+Observed state is now exposed **only** via Prometheus `/metrics` + local SQLite (items 1.1, 1.2,
+1.5, 3.1). The control repo is desired-state-only and steward treats it as read-only.
 
-```json
-{
-  "node": "node1.lan",
-  "updated_at": "2026-05-19T08:00:05Z",
-  "apps": {
-    "arr": {
-      "sync_status": "Synced",
-      "health_status": "Healthy",
-      "deployed_sha": "def456",
-      "remote_sha": "def456",
-      "last_synced_at": "2026-05-19T07:45:01Z"
-    },
-    "prometheus-node-exporter": {
-      "sync_status": "OutOfSync",
-      "health_status": "Healthy",
-      "deployed_sha": "abc123",
-      "remote_sha": "ghi789",
-      "last_synced_at": "2026-05-18T14:00:01Z"
-    }
-  }
-}
-```
-
-The full operation history stays in SQLite locally (item 1.5). The status file is the lightweight
-"observed state snapshot" — the equivalent of what ArgoCD writes to the Application CRD's
-`.status` subresource.
-
-**Open questions:** resolved.
-- Write access to the control repo requires a token with push rights. This is a broader
-  permission than the current read-only token. Should the writeback use a separate deploy key
-  scoped to only the `nodes/<hostname>/` path, or is a single read/write token acceptable?
-- What is the commit frequency? Writing after every reconcile cycle (every minute) will generate
-  significant commit noise in the control repo. Options: (a) only write when status changes,
-  (b) write at most once per N minutes (e.g. 5), (c) write to a dedicated `status` branch so
-  `main` stays clean. Option (a) is most GitOps-correct and generates the least noise.
-- Should the `status.json` file be committed by steward directly (using gitpython) or via the
-  GitHub/GitLab API (avoids needing git push rights, uses a fine-grained token)? The API
-  approach is cleaner for GitHub-hosted control repos.
-- If the control repo push fails (network outage, token expired), should steward treat this as a
-  reconcile failure or a silent best-effort? Recommendation: log the error and continue — status
-  writeback is observability, not a correctness requirement.
-- What branch should the status file be committed to? `main` keeps everything in one place but
-  mixes desired and observed state commits. A `status` branch is cleaner but adds complexity.
-
-**Decisions (2026-05-23):**
-- Use a single read/write token for control repo access (no separate path-scoped key in first version).
-- Write `nodes/<hostname>/status.json` only when file content changes.
-- Use direct git commit/push via gitpython to `CONTROL_REPO_BRANCH`.
-- If writeback fails, mark the reconcile run as `partial_failure` and continue processing app results.
-- Status writeback commits target `CONTROL_REPO_BRANCH` (default `main`).
-
-**Implementation status:**
-- Steward now renders observed app state to `nodes/<hostname>/status.json` after each run.
-- Writeback commits are skipped when the rendered content is unchanged.
-- Status writeback is committed and pushed with gitpython to `CONTROL_REPO_BRANCH`.
-- Writeback failure is surfaced as reconcile `partial_failure`.
-
-**Complexity:** Medium — mostly complete in implementation; future hardening can improve auth
-scope and branch protections.
+**Superseded decisions (2026-05-23, no longer in effect):** single read/write token; write
+`status.json` only on content change; direct gitpython commit/push to `CONTROL_REPO_BRANCH`;
+writeback failure → `partial_failure`.
 
 ---
 
@@ -1243,12 +1196,87 @@ Depends on: Phase 1 complete (script uses same templates as reference).
 
 ---
 
+### Phase 3 — Setup diagnostic script (`scripts/doctor.sh`)
+
+**Scope:** A standalone bash script that validates a node's steward setup **both on the host
+and inside the running container**. The validation logic stays OUT of `steward.py` (the runtime
+stays lean); this is an external operator tool. It exists to catch the class of misconfiguration
+that otherwise costs hours of debugging — a wrong host in `CONTROL_REPO_URL` (e.g. `github.com`
+where `gitlab.com` was meant), an empty/mismatched `known_hosts`, or a missing deploy key — and
+to surface the failure in one clear line instead of a cascade of misleading SSH errors.
+
+**Design decisions:**
+
+- bash, located at `scripts/doctor.sh`, executable.
+- **Run from the deployment directory** — the user `cd`s into the steward deployment dir first;
+  the script reads `.env`, `credentials.yml`, `docker-compose.override.yml` from CWD. No `--dir`
+  flag.
+- One invocation from the host: it runs host checks, then auto-detects the running container and
+  `docker exec`s into it for the in-container checks.
+- **Run all checks, then print a pass / warn / fail summary; exit non-zero if any check FAILed.**
+- Performs a **live `git ls-remote`** inside the container against `CONTROL_REPO_URL` — this
+  reproduces the real clone path. (Note: `ssh -T git@host` is NOT a valid test — deploy keys are
+  repo-scoped and always return `Permission denied (publickey)` even on a working node.)
+
+**Gotchas the script must encode (learned the hard way):**
+
+- `docker exec` defaults to root, so `~` resolves to `/root`; but steward runs as a non-root user
+  with `HOME=/home/steward`. The script must detect the effective HOME, not assume `~`.
+- With `credentials.yml`, the known_hosts file lives at the secret path referenced by
+  `UserKnownHostsFile` in the generated `~/.ssh/config` — NOT at `~/.ssh/known_hosts`.
+- Referencing a `known_hosts` file forces `StrictHostKeyChecking yes`; if it is empty or missing
+  the control-repo host, every clone fails with `Host key verification failed`.
+- A wrong host in `CONTROL_REPO_URL` surfaces as `Permission denied (publickey)` only *after*
+  host-key trust passes — so the script echoes the resolved host explicitly.
+
+**Checks:**
+
+*Phase A — host:*
+1. `docker` and `docker compose` v2 present.
+2. `.env` exists; `CONTROL_REPO_URL` set and non-empty; warn if still the example value.
+3. URL format is SSH/HTTPS; FAIL on embedded credentials.
+4. Extract and **echo the host** from `CONTROL_REPO_URL` (makes github-vs-gitlab typos obvious).
+5. `STEWARD_DATA_DIR` exists/creatable; `STEWARD_UID`/`STEWARD_GID` set (warn if root).
+6. If `credentials.yml` is referenced: it parses and each `key_file` exists on the host.
+7. If a known_hosts file is referenced: it exists AND contains an entry for the control-repo host.
+
+*Phase B — container (skip + warn if not running):*
+8. Container `steward` is running.
+9. Detect effective `HOME` inside the container → derive the SSH config path.
+10. Show the generated SSH config: `StrictHostKeyChecking` + `UserKnownHostsFile`/`IdentityFile`.
+11. Resolve the known_hosts path SSH actually uses; verify it contains the control-repo host key.
+12. Verify the identity key file exists and is non-empty in the container.
+13. **Live test:** `docker exec … git ls-remote <CONTROL_REPO_URL>` via the container's SSH
+    config; PASS if refs return, FAIL with captured stderr.
+14. Compare the container's `CONTROL_REPO_URL` env to `.env` (catches drift).
+
+*Summary:* `N passed / N warnings / N failed`; exit 1 if any failed.
+
+**Companion README changes:**
+
+- Add a "Validate your setup" step to the quick start pointing to `scripts/doctor.sh`.
+- Fix the existing Troubleshooting diagnose commands — they use `~/.ssh/config` and
+  `~/.ssh/known_hosts`, which are wrong under `docker exec` (root HOME) and for the credentials.yml
+  path (known_hosts at the secret path). Use `/home/steward/.ssh/config` (with `/root` fallback)
+  and the resolved `UserKnownHostsFile` path.
+- Add a `Permission denied (publickey)` Troubleshooting entry (causes: wrong host/typo in
+  `CONTROL_REPO_URL`; deploy key not registered with write access; the `ssh -T` false-negative —
+  use `git ls-remote <repo>` instead).
+
+**Verification:** `bash -n scripts/doctor.sh` and `shellcheck`; run on a known-good node (all pass)
+and against a deliberately broken URL (clear FAIL at the `git ls-remote` step).
+
+**Complexity:** Low — read-only diagnostic; no `steward.py` runtime changes.
+
+---
+
 ### Status
 
 - [x] Phase 1a — `.env.example`
 - [x] Phase 1b — `docker-compose.override.yml.example`
 - [x] Phase 1c — README quick-start streamline
 - [ ] Phase 2 — `setup.sh`
+- [x] Phase 3 — `scripts/doctor.sh` setup diagnostic + README troubleshooting fixes
 
 ---
 
@@ -1376,3 +1404,141 @@ image fix but covers bootstrap/local deploys and documents intent.
 
 **Cleanup:** Deploying the new container image recreates the container, clearing the
 accumulated 9036 zombies via a fresh PID namespace.
+
+**Status: fixed** — implemented and pushed to main 2026-06-07
+
+### Follow-up: tini PID-1 warning regression
+
+**Status: planned (not yet implemented)**
+
+The zombie fix added BOTH `init: true` in `docker-compose.yml` AND `exec tini -- crond` in
+`entrypoint.sh`. With `init: true`, Docker injects `docker-init` as PID 1, so the entrypoint's
+own `tini` no longer runs as PID 1 — it starts as a non-PID-1 process and logs on every boot:
+
+```
+[WARN tini (7)] Tini is not running as PID 1 and isn't registered as a child subreaper.
+```
+
+Reaping still works (docker-init at PID 1 reaps the orphaned zombies), so this is harmless but
+noisy and confusing. The two init layers are redundant.
+
+**Fix — Option A (chosen): single init via compose, drop the in-image tini.**
+
+| File | Change |
+|---|---|
+| `entrypoint.sh` | `exec tini -- crond -f -l 6` → `exec crond -f -l 6`; update the comment block (reaping is provided by compose `init: true`, not tini) |
+| `Dockerfile` | Remove `tini=~0.19` from the `apk add` list (mind the `&& \` chaining) |
+| `docker-compose.yml` | Update the `init: true` inline comment — drop "alongside tini in the image" |
+
+Keep `init: true` as the single reaping init. (Trade-off: local `docker run` without `--init`
+would lose reaping, but steward is always deployed via compose, which sets `init: true`.)
+
+**Verification:** container starts with no `[WARN tini …]` line; under load, orphaned git/ssh
+children are still reaped (docker-init at PID 1).
+
+---
+
+## Decision: drop git status writeback (return to GitOps principles)
+
+**Status: decided 2026-06-10 — implementation pending.**
+
+### Trigger
+
+On media-1 (running fine for weeks), after adding a second node (agent-1) to the control repo,
+status writeback began failing every cycle:
+
+```
+ERROR [steward] Status writeback failed: Cmd('git') failed due to: exit code(1)
+  cmdline: git push origin main
+  stderr: ! [rejected]  main -> main (fetch first) … Updates were rejected because the
+          remote contains work that you do not have locally.
+```
+
+and the **next** reconcile could no longer pull:
+
+```
+ERROR [steward] git pull/checkout failed: exit code(128)
+  hint: You have divergent branches and need to specify how to reconcile them.
+```
+
+### Root cause
+
+1. `_write_status_snapshot` commits `nodes/<host>/status.json` locally, **then** pushes. When
+   another node pushed in between, the push is rejected — but the local commit stays, so the
+   control working copy diverges from `origin/main`.
+2. `apply_ref` pulls the control repo with a bare `git pull origin main` (no merge strategy), so
+   git ≥ 2.27 refuses the divergent branches with `exit 128`. The node is then wedged: it can
+   neither advance the control repo nor write status.
+
+Each node writes a *different* file, so there is never a content conflict — only a
+fast-forward conflict. The real defect is architectural: **the reconciler writes to the same
+ref it reads desired state from.**
+
+### Why it was nearly invisible in Grafana (the worrying part)
+
+- `_status_writeback` is a **pseudo-app** — only a key in the in-memory `results` dict, never
+  written to `state["apps"]`, so `steward_app_reconcile_total{app="_status_writeback"}` is never
+  emitted and "Repeated reconcile failures" cannot fire.
+- Control-repo-sync failure bumps `steward_control_repo_sync_total{result="failed"}` but does
+  **not** feed `run_result`, and there is **no alert** on that counter.
+- Freshness alerts stay green because steward keeps running each minute and updates
+  `last_timestamp`. The node looks healthy.
+
+### Decision
+
+Return to GitOps principles: **remove the writeback entirely** (Option 1 — most GitOps-pure).
+Observed state lives only in Prometheus + SQLite; git holds desired state only. This also
+eliminates the push race and the divergent-pull deadlock at the root — if steward never commits
+to the control repo, `origin/main` only moves forward relative to local, so `git pull` always
+fast-forwards.
+
+### Removal scope (implementation pending)
+
+**Code (`steward.py`):**
+- Remove `_build_status_snapshot` and `_write_status_snapshot`.
+- Remove `_ts_to_iso` (only the snapshot used it). Keep `_now_iso` (used by operation history
+  and notifications).
+- In `reconcile()`, remove the `_write_status_snapshot(...)` call, `status_write_ok`, the
+  `_status_writeback` pseudo-app `results` entry, and the writeback `partial_failure` branch.
+  Keep `control_repo.close()`.
+
+**Observability (close the remaining blind spots):**
+- Add a Grafana alert on `increase(steward_control_repo_sync_total{result="failed"}[15m]) > 0`.
+- Add a Grafana alert on `increase(steward_reconcile_total{result="partial_failure"}[15m]) > 0`.
+
+**Docs:**
+- README: control-repo deploy key drops to **read-only** (was read/write for writeback) — a
+  least-privilege improvement; call it out.
+- README: remove the "write observed state snapshot to `nodes/<hostname>/status.json`" step from
+  the reconciler-flow diagram.
+- README: state explicitly that observed state is exposed via Prometheus + SQLite, not written
+  back to git (reinforces the item 2.2 write-path contract).
+- README: add the two new alerts to the Grafana alerts table.
+- `sequence.md`: amend the Phase 7 note — 2.1 writeback removed 2026-06-10; 2.2 (dry-run / oob
+  contract) stays.
+
+**Tests:**
+- Add a guard test: a reconcile performs **no** commit/push on the control repo (HEAD stays at
+  `origin` HEAD). (No existing writeback tests to delete.)
+
+### Decided follow-ups
+
+1. **Delete** the existing `nodes/<host>/status.json` files from the control repo — they are now
+   stale observed-state artifacts. This is a **one-time manual cleanup commit by a human** (steward
+   no longer touches the control repo). Also scan the control repo / homelab-gitops for any
+   consumer that reads `status.json` and adjust it so nothing breaks.
+2. Optional control-repo `reset --hard origin/<branch>` self-heal hardening: **deferred** —
+   fast-forward is guaranteed once writeback is gone; revisit only if manual drift on a node bites.
+
+### Operational recovery (manual, one-off)
+
+media-1 is currently wedged on a divergent local control-repo commit. Recover with
+`git -C /git/control reset --hard origin/main` (or redeploy the container). This cannot recur
+once the writeback removal ships.
+
+### Verification
+
+- `uv run ruff check steward.py metrics_server.py tests/`
+- `uv run pytest tests/ -v --tb=short` (including the new no-push guard test)
+- Manual: after a reconcile, no `status.json` commit appears; control repo HEAD == origin HEAD;
+  metrics still expose sync/health status.
