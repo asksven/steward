@@ -6,12 +6,11 @@ updates:
       interval: "daily"
     labels:
       - "dependencies"
-  - package-ecosystem: "docker-compose"
-    directory: "/"
-    schedule:
-      interval: "daily"
-    labels:
-      - "dependencies"
+  # The docker-compose ecosystem (which watched the steward image pin in
+  # docker-compose.yml) was intentionally removed. The steward image bump is owned
+  # by the bump-self-image job in .github/workflows/build.yml, which opens the pin
+  # PR immediately on a v* tag push. Running both produced duplicate, clashing PRs,
+  # and Dependabot's daily cadence added unwanted latency.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:

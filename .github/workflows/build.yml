@@ -124,8 +124,12 @@ jobs:
 
       - name: Update image tag in docker-compose.yml
         run: |
-          NEW_TAG="${{ github.ref_name }}"
-          sed -i "s|ghcr.io/asksven/steward:[^ }]*|ghcr.io/asksven/steward:${NEW_TAG}|g" docker-compose.yml
+          # github.ref_name is the v-prefixed git tag (e.g. v0.4.4), but the image
+          # is published to GHCR with the v stripped (docker/metadata-action
+          # {{version}} => 0.4.4). Strip the v so the pin matches a tag that exists.
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          sed -i "s|ghcr.io/asksven/steward:[^ }]*|ghcr.io/asksven/steward:${VERSION}|g" docker-compose.yml
 
       - name: Open pull request
         uses: peter-evans/create-pull-request@v7

@@ -251,7 +251,7 @@ repo: git@github.com:you/arr-stack.git
 
 ## Self-update
 
-Steward updates itself the same way it updates any other app: through git. The image version is pinned directly in `docker-compose.yml` and **Dependabot** opens a PR whenever a new release is published to GHCR. Merging the PR causes steward to detect a change in its own stack repo and trigger an update.
+Steward updates itself the same way it updates any other app: through git. The image version is pinned directly in `docker-compose.yml`. When you push a `v*` release tag, the `bump-self-image` CI job opens a PR that bumps the pin to the new version. Merging the PR causes steward to detect a change in its own stack repo and trigger an update.
 
 ### Why a helper container?
 
@@ -286,6 +286,47 @@ path: .
 compose_file: docker-compose.yml
 enabled: true
 ```
+
+---
+
+## Upgrade notes
+
+### Upgrading from 0.4.4 — remove stale control-repo status files (one-time)
+
+Versions up to 0.4.4 wrote an observed-state snapshot back to the control repo at
+`nodes/<hostname>/status.json`. That writeback has been **removed** — steward now exposes
+observed state via Prometheus + SQLite only, and the control repo holds *desired* state
+exclusively (and a **read-only** deploy key is now sufficient).
+
+After rolling the new image out to **every** node, the code stops touching the control repo and
+any node wedged on a divergent control-repo commit self-heals on its next reconcile. The
+`status.json` files committed by older versions remain, though, so do this one-time cleanup
+**by hand** (steward will never delete them):
+
+1. **Check nothing still reads them.** In the control repo:
+   ```bash
+   grep -rn "status.json" .
+   ```
+   Repoint any dashboard or tooling that parses `status.json` at the Prometheus `/metrics`
+   endpoint instead.
+
+2. **Delete the stale files in a single human commit:**
+   ```bash
+   git pull
+   find nodes -name status.json        # confirm the paths first
+   git rm nodes/*/status.json
+   git commit -m "Remove stale steward status.json (writeback removed in >0.4.4)"
+   git push
+   ```
+   This is **one** commit total for the whole fleet — all nodes share the one control repo, so
+   it is not a per-node step.
+
+3. **Confirm it stays clean.** On a node host, after the next reconcile cycle:
+   ```bash
+   git -C /git/control status                    # clean, no status.json
+   git -C /git/control rev-parse HEAD
+   git -C /git/control rev-parse origin/main     # should match
+   ```
 
 ---
 
@@ -534,7 +575,7 @@ To run a locally built image without changing `docker-compose.yml`, set `AGENT_I
 AGENT_IMAGE=ghcr.io/<you>/steward:dev
 ```
 
-This overrides the pinned tag for that node only and is not tracked by Dependabot.
+This overrides the pinned tag for that node only and is not tracked by the bump workflow.
 
 ### Releasing
 
@@ -562,7 +603,7 @@ git push origin main          # triggers build → updates :latest, :main
 
 # Tag the release
 git tag v0.1.0
-git push origin v0.1.0        # triggers build → creates :v0.1.0, :0.1.0, :0.1, :0
+git push origin v0.1.0        # triggers build → creates :0.1.0, :sha-<sha>
 ```
 
 Push both in the same command if you prefer:
@@ -572,4 +613,4 @@ git tag v0.1.0
 git push origin main v0.1.0
 ```
 
-The image tag in `docker-compose.yml` is the source of truth. Dependabot opens a PR on every new release; merging it triggers a self-update on the next reconcile cycle.
+The image tag in `docker-compose.yml` is the source of truth. The `bump-self-image` CI job opens a PR on every `v*` tag (pinning the v-stripped version, e.g. `0.1.0`, to match the published GHCR tag); merging it triggers a self-update on the next reconcile cycle.
