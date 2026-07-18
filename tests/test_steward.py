@@ -647,6 +647,119 @@ def test_run_compose_uses_manifest_pull_policy(
     assert seen_cmd[seen_cmd.index("--pull") + 1] == "missing"
 
 
+def test_run_compose_includes_override_file_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+    override_file = tmp_path / "docker-compose.override.yml"
+    override_file.write_text("services: {}\n")
+
+    app = steward.AppManifest(
+        version=1,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    seen_cmd: list[str] = []
+
+    def _fake_run(cmd, **_kwargs):
+        seen_cmd[:] = cmd
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(steward.subprocess, "run", _fake_run)
+
+    result = steward.run_compose(app, tmp_path)
+
+    assert result is True
+    f_indices = [i for i, v in enumerate(seen_cmd) if v == "-f"]
+    assert len(f_indices) == 2
+    assert seen_cmd[f_indices[0] + 1] == str(compose_file)
+    assert seen_cmd[f_indices[1] + 1] == str(override_file)
+
+
+def test_run_compose_omits_override_file_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+
+    app = steward.AppManifest(
+        version=1,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    seen_cmd: list[str] = []
+
+    def _fake_run(cmd, **_kwargs):
+        seen_cmd[:] = cmd
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(steward.subprocess, "run", _fake_run)
+
+    result = steward.run_compose(app, tmp_path)
+
+    assert result is True
+    f_indices = [i for i, v in enumerate(seen_cmd) if v == "-f"]
+    assert len(f_indices) == 1
+    assert seen_cmd[f_indices[0] + 1] == str(compose_file)
+
+
+def test_load_compose_services_status_includes_override_file_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services:\n  web:\n    image: nginx\n")
+    override_file = tmp_path / "docker-compose.override.yml"
+    override_file.write_text("services: {}\n")
+
+    app = steward.AppManifest(
+        version=1,
+        name="demo",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=True,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = '[{"Service":"web","State":"running"}]\n'
+        return result
+
+    monkeypatch.setattr(steward.subprocess, "run", fake_run)
+
+    rows = steward._load_compose_services_status(app, tmp_path)
+
+    assert rows == [{"Service": "web", "State": "running"}]
+    f_indices = [i for i, v in enumerate(calls[0]) if v == "-f"]
+    assert len(f_indices) == 2
+    assert calls[0][f_indices[1] + 1] == str(override_file)
+
+
 def test_reconcile_app_manual_sync_skips_apply(monkeypatch: pytest.MonkeyPatch) -> None:
     app = steward.AppManifest(
         version=2,

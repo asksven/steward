@@ -853,6 +853,23 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
         return False
 
 
+def _compose_file_args(app: AppManifest, stack_path: Path) -> list[str]:
+    """Return the -f arguments for docker compose, including override if present.
+
+    Docker Compose only auto-loads docker-compose.override.yml when no explicit -f
+    is supplied.  Because steward always passes an explicit -f (to support custom
+    compose_file names and stable project names), the override file must also be
+    passed explicitly to preserve host-specific settings such as SSH secrets.
+    """
+    compose_file = stack_path / app.path / app.compose_file
+    args = ["-f", str(compose_file)]
+    override_file = stack_path / app.path / "docker-compose.override.yml"
+    if override_file.exists():
+        args += ["-f", str(override_file)]
+        log.debug("App '%s': including override file %s", app.name, override_file)
+    return args
+
+
 def run_compose(app: AppManifest, stack_path: Path) -> bool:
     """
     Run docker compose with an explicit project name and configured pull policy.
@@ -871,8 +888,7 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
         "compose",
         "--project-name",
         app.name,
-        "-f",
-        str(compose_file),
+        *_compose_file_args(app, stack_path),
     ]
 
     env = os.environ.copy()
@@ -937,8 +953,7 @@ def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optiona
         "compose",
         "--project-name",
         app.name,
-        "-f",
-        str(compose_file),
+        *_compose_file_args(app, stack_path),
     ]
     if app.env_file:
         env_path = Path(app.env_file)
@@ -1010,8 +1025,7 @@ def _load_expected_services(app: AppManifest, stack_path: Path) -> Optional[set[
         "compose",
         "--project-name",
         app.name,
-        "-f",
-        str(compose_file),
+        *_compose_file_args(app, stack_path),
     ]
     if app.env_file:
         env_path = Path(app.env_file)
