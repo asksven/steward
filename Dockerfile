@@ -6,7 +6,7 @@ ARG UV_VERSION=0.8.4
 RUN apk add --no-cache \
     git=~2 \
     docker-cli=~29 \
-    docker-cli-compose=~2 \
+    docker-cli-compose=~5 \
     openssh-client=~10 \
     su-exec=~0.3 && \
     pip install --no-cache-dir "uv==${UV_VERSION}"
