@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from git import GitCommandError, Repo
 
+import state_store
 import steward
 
 
@@ -1525,6 +1526,89 @@ def test_sqlite_state_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert loaded["reconcile"]["control_repo_sync_total"]["updated"] == 2
     assert loaded["apps"]["demo"]["reconcile_total"]["failed"] == 2
     assert loaded["apps"]["demo"]["sync_total"]["success"] == 3
+
+
+def test_prune_apps_removes_stale_app_rows(tmp_path: Path) -> None:
+    """An app no longer present in the manifests (e.g. renamed) is deleted from the DB."""
+    db_file = tmp_path / "steward.db"
+    node = "test-node"
+
+    state = {
+        "node": node,
+        "reconcile": {},
+        "apps": {
+            "hermes": {"sync_status": "OutOfSync", "health_status": "Healthy"},
+            "hermes-compose": {"sync_status": "Synced", "health_status": "Healthy"},
+        },
+    }
+    state_store.save_state(db_file, node, state)
+
+    removed = state_store.prune_apps(db_file, node, keep_apps={"hermes-compose"})
+
+    assert removed == ["hermes"]
+    loaded = state_store.load_state(db_file, node)
+    assert "hermes" not in loaded["apps"]
+    assert "hermes-compose" in loaded["apps"]
+
+
+def test_prune_apps_refuses_empty_keep_set(tmp_path: Path) -> None:
+    """An empty keep-set is a no-op, guarding against wiping state on a bad manifest read."""
+    db_file = tmp_path / "steward.db"
+    node = "test-node"
+
+    state_store.save_state(
+        db_file, node, {"node": node, "reconcile": {}, "apps": {"demo": {"sync_status": "Synced"}}}
+    )
+
+    removed = state_store.prune_apps(db_file, node, keep_apps=set())
+
+    assert removed == []
+    loaded = state_store.load_state(db_file, node)
+    assert "demo" in loaded["apps"]
+
+
+def test_reconcile_prunes_renamed_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reconcile removes stale state for an app renamed/removed from the manifests."""
+    renamed_app = steward.AppManifest(
+        version=2,
+        name="hermes-compose",
+        repo="git@example.com:org/repo.git",
+        ref=steward.AppRef(branch="main"),
+        path=".",
+        compose_file="docker-compose.yml",
+        env_file=None,
+        enabled=False,
+        source_file=Path("/tmp/app.yml"),
+    )
+
+    class _FakeRepo:
+        working_dir = "/tmp/control"
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(steward, "DB_FILE", tmp_path / "steward.db")
+    monkeypatch.setattr(steward, "CONTROL_REPO_URL", "git@example.com:org/control.git")
+    monkeypatch.setattr(steward, "ensure_repo", lambda **_kwargs: _FakeRepo())
+    monkeypatch.setattr(steward, "sync_repo", lambda _repo, _ref: False)
+    monkeypatch.setattr(steward, "load_node_manifests", lambda _repo: ([renamed_app], []))
+
+    state_store.save_state(
+        steward.DB_FILE,
+        steward.GITOPS_NODE_NAME,
+        {
+            "node": steward.GITOPS_NODE_NAME,
+            "reconcile": {},
+            "apps": {"hermes": {"sync_status": "OutOfSync", "health_status": "Healthy"}},
+        },
+    )
+
+    result = steward.reconcile()
+
+    assert result == 0
+    loaded = state_store.load_state(steward.DB_FILE, steward.GITOPS_NODE_NAME)
+    assert "hermes" not in loaded["apps"]
+    assert "hermes-compose" in loaded["apps"]
 
 
 def test_reconcile_sets_disabled_sync_status(monkeypatch: pytest.MonkeyPatch) -> None:

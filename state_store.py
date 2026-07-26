@@ -172,6 +172,46 @@ def load_state(db_file: Path, node_name: str, require_data: bool = False) -> dic
     return state
 
 
+def prune_apps(db_file: Path, node_name: str, keep_apps: set[str]) -> list[str]:
+    """
+    Remove app rows for this node that are no longer present in the current
+    set of manifests (e.g. an app was renamed or deleted in the control repo).
+
+    Without this, a renamed/removed app's last-known state (sync_status,
+    health_status, etc.) lingers forever in the DB and keeps being exposed on
+    /metrics, tripping alerts like "App not reconciled" or a stuck OutOfSync
+    status indefinitely. Returns the list of app names that were removed.
+    """
+    if not keep_apps:
+        # Refuse to wipe everything on an empty/unknown keep-set - this is only
+        # called when we have a confirmed, non-empty manifest listing for the node.
+        return []
+
+    conn = _connect(db_file)
+    _init(conn)
+
+    placeholders = ",".join("?" for _ in keep_apps)
+    rows = conn.execute(
+        f"SELECT app FROM app_state WHERE node = ? AND app NOT IN ({placeholders})",
+        (node_name, *keep_apps),
+    ).fetchall()
+    removed = [row["app"] for row in rows]
+
+    if removed:
+        conn.execute(
+            f"DELETE FROM app_state WHERE node = ? AND app NOT IN ({placeholders})",
+            (node_name, *keep_apps),
+        )
+        conn.execute(
+            f"DELETE FROM app_manifest WHERE node = ? AND app NOT IN ({placeholders})",
+            (node_name, *keep_apps),
+        )
+        conn.commit()
+
+    conn.close()
+    return removed
+
+
 def save_state(db_file: Path, node_name: str, state: dict) -> None:
     conn = _connect(db_file)
     _init(conn)

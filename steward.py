@@ -24,6 +24,7 @@ import yaml
 from git import GitCommandError, InvalidGitRepositoryError, Repo
 
 from state_store import load_state as load_sqlite_state
+from state_store import prune_apps as prune_sqlite_apps
 from state_store import save_state as save_sqlite_state
 
 _EMBEDDED_CREDENTIALS_RE = re.compile(r"(https?://)([^:@\s]+:[^@\s]+@)")
@@ -1576,6 +1577,21 @@ def reconcile() -> int:
         _inc(state, "reconcile", "total", "success")
         _save_metrics_state(state)
         return 0
+
+    # Prune apps that disappeared from the node's manifests (renamed or deleted
+    # in the control repo) so their stale sync/health status stops being served
+    # on /metrics and no longer trips alerts forever.
+    current_app_names = {app.name for app in manifests} | {
+        app_name for _filename, app_name, _err_msg in parse_error_entries
+    }
+    try:
+        removed = prune_sqlite_apps(DB_FILE, GITOPS_NODE_NAME, current_app_names)
+        if removed:
+            log.info("Pruned stale app state for renamed/removed apps: %s", ", ".join(removed))
+            for name in removed:
+                state.get("apps", {}).pop(name, None)
+    except Exception as e:
+        log.warning("Failed to prune stale app state: %s", e)
 
     # Step 3: reconcile each enabled app
     results: dict[str, str] = {}
