@@ -230,6 +230,46 @@ def test_parse_credentials_file_without_known_hosts(tmp_path: Path) -> None:
     assert cfg.known_hosts_file is None
 
 
+def test_parse_credentials_file_with_hostname_alias(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - pattern: github.com-arr\n"
+        "    hostname: github.com\n"
+        "    key_file: /run/secrets/arr_key\n"
+    )
+
+    cfg = steward.parse_credentials_file(str(creds_file))
+
+    assert cfg.credentials[0].pattern == "github.com-arr"
+    assert cfg.credentials[0].hostname == "github.com"
+    assert cfg.credentials[0].key_file == "/run/secrets/arr_key"
+
+
+def test_parse_credentials_file_hostname_defaults_to_none(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n  - pattern: github.com\n    key_file: /run/secrets/github_key\n"
+    )
+
+    cfg = steward.parse_credentials_file(str(creds_file))
+
+    assert cfg.credentials[0].hostname is None
+
+
+def test_parse_credentials_file_rejects_non_string_hostname(tmp_path: Path) -> None:
+    creds_file = tmp_path / "credentials.yml"
+    creds_file.write_text(
+        "credentials:\n"
+        "  - pattern: github.com-arr\n"
+        "    hostname: 123\n"
+        "    key_file: /run/secrets/arr_key\n"
+    )
+
+    with pytest.raises(ValueError, match="hostname"):
+        steward.parse_credentials_file(str(creds_file))
+
+
 def test_parse_credentials_file_rejects_missing_pattern(tmp_path: Path) -> None:
     creds_file = tmp_path / "credentials.yml"
     creds_file.write_text("credentials:\n  - key_file: /run/secrets/github_key\n")
@@ -343,6 +383,40 @@ def test_generate_ssh_config_wildcard_fallback() -> None:
 
     assert "Host *" in text
     assert "IdentityFile /run/secrets/default_key" in text
+
+
+def test_generate_ssh_config_emits_hostname_for_alias() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(
+                pattern="github.com-arr",
+                hostname="github.com",
+                key_file="/run/secrets/arr_key",
+            ),
+        ]
+    )
+
+    text = steward.generate_ssh_config(cfg)
+
+    assert "Host github.com-arr" in text
+    assert "HostName github.com" in text
+    assert "IdentityFile /run/secrets/arr_key" in text
+
+
+def test_generate_ssh_config_omits_hostname_when_equal_to_host() -> None:
+    cfg = steward.CredentialsConfig(
+        credentials=[
+            steward.CredentialEntry(
+                pattern="github.com",
+                hostname="github.com",
+                key_file="/run/secrets/github_key",
+            ),
+        ]
+    )
+
+    text = steward.generate_ssh_config(cfg)
+
+    assert "HostName" not in text
 
 
 def test_fetch_ref_sanitizes_error_log(monkeypatch: pytest.MonkeyPatch) -> None:

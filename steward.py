@@ -256,8 +256,11 @@ STEWARD_CREDENTIALS_FILE = os.environ.get("STEWARD_CREDENTIALS_FILE", "/app/cred
 
 @dataclass
 class CredentialEntry:
-    pattern: str  # glob pattern matched against the git host (e.g. "github.com", "*.internal")
+    pattern: (
+        str  # SSH Host to match — a real host or an alias (e.g. "github.com", "github.com-arr")
+    )
     key_file: str  # path to the SSH private key file (e.g. /run/secrets/github_key)
+    hostname: Optional[str] = None  # real host when 'pattern' is an alias (e.g. "github.com")
 
 
 @dataclass
@@ -289,10 +292,13 @@ def parse_credentials_file(path: str) -> CredentialsConfig:
             raise ValueError(f"credentials[{i}] must be a mapping")
         pattern = item.get("pattern")
         key_file = item.get("key_file")
+        hostname = item.get("hostname")
         if not pattern or not isinstance(pattern, str):
             raise ValueError(f"credentials[{i}]: 'pattern' is required and must be a string")
         if not key_file or not isinstance(key_file, str):
             raise ValueError(f"credentials[{i}]: 'key_file' is required and must be a string")
+        if hostname is not None and (not hostname or not isinstance(hostname, str)):
+            raise ValueError(f"credentials[{i}]: 'hostname' must be a non-empty string when set")
         # Warn about path-component patterns — SSH Host matching is hostname-only
         if "/" in pattern and pattern != "*":
             log.warning(
@@ -302,7 +308,7 @@ def parse_credentials_file(path: str) -> CredentialsConfig:
                 pattern,
                 pattern.split("/")[0],
             )
-        entries.append(CredentialEntry(pattern=pattern, key_file=key_file))
+        entries.append(CredentialEntry(pattern=pattern, key_file=key_file, hostname=hostname))
 
     known_hosts_file = raw.get("known_hosts_file")
     if known_hosts_file is not None and not isinstance(known_hosts_file, str):
@@ -326,6 +332,10 @@ def generate_ssh_config(
         # operates on the hostname only. A warning is already emitted at parse time.
         host_part = entry.pattern.split("/")[0]
         lines.append(f"Host {host_part}")
+        # When the pattern is an alias, HostName maps it to the real host so
+        # multiple keys can target the same host (e.g. per-repo GitHub deploy keys).
+        if entry.hostname and entry.hostname != host_part:
+            lines.append(f"  HostName {entry.hostname}")
         lines.append(f"  IdentityFile {entry.key_file}")
         lines.append("  IdentitiesOnly yes")
         lines.append(f"  StrictHostKeyChecking {strict_host_key_checking}")

@@ -1,5 +1,7 @@
 .env
 docker-compose.override.yml
+credentials.yml
+steward-data/
 
 # Python/cache artifacts
 __pycache__/

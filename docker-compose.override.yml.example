@@ -1,57 +1,38 @@
 # docker-compose.override.yml.example
 #
-# Copy this file to docker-compose.override.yml and edit the key paths.
-# docker-compose.override.yml is gitignored — it holds host-specific paths.
+# Copy this file to docker-compose.override.yml and edit the host key paths.
+# docker-compose.override.yml is gitignored — it holds host-specific paths
+# (your deploy keys, known_hosts, and credentials.yml).
 #
-# Two setups are shown below. Use one; comment out or delete the other.
-
-# ── Option A: Single deploy key (recommended) ─────────────────────────────────
+# scripts/setup.sh generates this file for you; edit by hand only if you are
+# doing a manual setup.
 #
-# One SSH key that has read access to the control repo and all app repos on
-# this node. Simplest setup; follow the principle of least privilege by
-# generating a dedicated key rather than reusing ~/.ssh/id_ed25519.
-#
-# Generate a dedicated key:
-#   ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
-# Then add ~/.ssh/steward_deploy_key.pub as a deploy key in GitHub/GitLab.
+# steward selects an SSH deploy key per git host (or per-repo alias) via
+# credentials.yml, which is mounted read-only into the container. Every key that
+# credentials.yml references must be declared as a Docker secret below.
 
 services:
   steward:
+    volumes:
+      # credentials.yml maps hosts/aliases → key_file (container paths under /run/secrets).
+      - ./credentials.yml:/app/credentials.yml:ro
     secrets:
-      - ssh_key
-      # Uncomment the line below if your SSH known_hosts is not baked into the image:
-      # - ssh_known_hosts
+      - control_key
+      - ssh_known_hosts
+      # Add one secret per additional per-repo key, e.g.:
+      # - arr_key
+
+    # Expose the Prometheus metrics port here if METRICS_PORT is set in .env:
+    # ports:
+    #   - "9101:9101"
 
 secrets:
-  ssh_key:
+  # Deploy key for the control repo (and any repo reachable with this one key).
+  control_key:
     file: /home/you/.ssh/steward_deploy_key
-  # ssh_known_hosts:
-  #   file: /home/you/.ssh/known_hosts
-
-
-# ── Option B: Multiple deploy keys (multiple git hosts) ───────────────────────
-#
-# Use when the control repo and app repos live on different git hosts (e.g.
-# GitHub + GitLab) and each host needs its own deploy key.
-#
-# Also requires a credentials.yml file on the host — see README §5.
-#
-# Uncomment the block below and comment out Option A above.
-
-# services:
-#   steward:
-#     volumes:
-#       - /etc/steward/credentials.yml:/app/credentials.yml:ro
-#     secrets:
-#       - github_key
-#       - gitlab_key
-#       # Uncomment if your SSH known_hosts is not baked into the image:
-#       # - ssh_known_hosts
-#
-# secrets:
-#   github_key:
-#     file: /home/you/.ssh/github_deploy_key
-#   gitlab_key:
-#     file: /home/you/.ssh/gitlab_deploy_key
-#   # ssh_known_hosts:
-#   #   file: /home/you/.ssh/known_hosts
+  # Populated by ssh-keyscan; referenced by known_hosts_file in credentials.yml.
+  ssh_known_hosts:
+    file: /home/you/.ssh/steward_known_hosts
+  # ── Additional per-repo keys (GitHub requires one key per repo) ───────────────
+  # arr_key:
+  #   file: /home/you/.ssh/steward_arr_key

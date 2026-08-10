@@ -29,109 +29,87 @@ On each node:
 
 ## Quick start
 
+The fastest path is the interactive setup script; a manual alternative follows.
+
 ### 1. Set up your control repo
 
 See the companion **homelab-gitops** README for the control repo structure. Create a directory for your node under `nodes/` and add app manifests.
 
-### 2. Create the `.env` file
+### 2. Run the setup script (recommended)
 
-Copy the example and fill in your values:
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and set the three required values:
-
-| Variable | What to put here |
-|---|---|
-| `CONTROL_REPO_URL` | SSH (or plain HTTPS) URL of your control repo |
-| `GITOPS_NODE_NAME` | Name of the directory under `nodes/` in your control repo |
-| `STEWARD_DATA_DIR` | Host path where steward stores cloned repos and state (e.g. `/opt/steward-data`) |
-
-Then add your host UID/GID so files in `STEWARD_DATA_DIR` are not root-owned:
+From the cloned steward repo:
 
 ```bash
-echo "STEWARD_UID=$(id -u)" >> .env
-echo "STEWARD_GID=$(id -g)" >> .env
+./scripts/setup.sh
 ```
 
-> **Note:** SSH (`git@host:path` or `ssh://host/path`) and plain HTTPS are supported.
-> HTTPS URLs with embedded credentials are **not** supported.
+It prompts for your control-repo URL, branch, and node name, then:
 
-### 3. Generate a deploy key
+- generates a dedicated **read-only** `ed25519` deploy key at `~/.ssh/steward_deploy_key` (never reusing your personal key);
+- runs `ssh-keyscan` for the control host and **asks you to verify the fingerprint** against the provider's published list before pinning it (strict host-key checking);
+- if this clone isn't already at `<STEWARD_DATA_DIR>/stacks/steward` (see [Bootstrap](#bootstrap)), asks for `STEWARD_DATA_DIR` and offers to provision a clone there for you, so config isn't lost on the first self-update;
+- writes `.env` (with your host UID/GID and the resolved `STEWARD_DATA_DIR`), `credentials.yml`, and `docker-compose.override.yml` next to that clone — all gitignored;
+- prints the public key to register and the steps to add more repos.
 
-Generate a dedicated SSH key for steward (do not reuse `~/.ssh/id_ed25519`):
-
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
-```
-
-Add `~/.ssh/steward_deploy_key.pub` as a **deploy key** to your GitHub/GitLab repos. **Read-only access is sufficient for every repo, including the control repo** — steward only ever reads from git (it never writes observed state back). Granting read-only keeps the deployment least-privilege.
-
-### 4. Decide how to trust the git host's SSH key
-
-  Before steward can clone over SSH it has to trust the git host's key. There are two options:
-
-  **Option A — trust on first use (default, zero config).** If you do **not** provide a `known_hosts` file, steward uses `StrictHostKeyChecking accept-new`: it trusts and records the host key on the first connection. This is the simplest path and what the single-key Quick Start uses out of the box — no action needed here.
-
-**Option B — pre-populate `known_hosts` (strict checking).** The moment you reference a `known_hosts` file — either the `ssh_known_hosts` secret (single-key setup) or `known_hosts_file` in `credentials.yml` (multi-key setup) — steward switches to `StrictHostKeyChecking yes`. That file **must already contain the host key**, or the clone fails with `Host key verification failed`. Generate it with `ssh-keyscan`:
-
-```bash
-ssh-keyscan -t rsa,ecdsa,ed25519 github.com > ~/.ssh/steward_known_hosts
-```
-
-Add one host per git host you use (e.g. `gitlab.com`, or your self-hosted git server):
-
-```bash
-ssh-keyscan -t rsa,ecdsa,ed25519 gitlab.com >> ~/.ssh/steward_known_hosts
-```
-
-> **Rule of thumb:** only reference a `known_hosts` file if you populate it. If you reference it but leave it empty (or missing the host you clone from), every clone fails with `Host key verification failed`. When in doubt, use Option A.
-
-### 5. Create `docker-compose.override.yml`
-
-Copy the example and update the key path:
-
-```bash
-cp docker-compose.override.yml.example docker-compose.override.yml
-```
-
-Edit `docker-compose.override.yml` and replace `/home/you/.ssh/steward_deploy_key` with the actual path to your key. The file is gitignored — it lives only on this host.
-
-For setups with keys across multiple git hosts (e.g. GitHub + GitLab), see [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys) below.
-
-### 6. Start the agent
+Add the printed public key as a **read-only deploy key** on your control repo (GitHub: per repository; GitLab: *Settings → Repository → Deploy keys*). Then start the agent and validate:
 
 ```bash
 docker compose up -d
+./scripts/doctor.sh
 ```
 
-The agent reconciles immediately on startup, then runs on the cron schedule.
+> **More repos:** GitHub forbids reusing one deploy key across repositories, so each additional GitHub stack repo needs its own key and SSH host alias. The script prints the exact steps — see [Advanced: per-repo & multi-host keys](#advanced-per-repo--multi-host-keys).
 
-### 7. Validate your setup
+### Manual setup (alternative)
 
-From the deployment directory (the one holding `.env`, `credentials.yml` and
-`docker-compose.override.yml`), run the diagnostic script. It checks your host
-config and the running container, then prints a pass / warn / fail summary:
+If you prefer to wire things up by hand:
 
-```bash
-/path/to/steward/scripts/doctor.sh
-```
+1. **`.env`** — clone steward into `<STEWARD_DATA_DIR>/stacks/steward` (see [Bootstrap](#bootstrap)), then from inside that clone run `cp .env.example .env` and set `CONTROL_REPO_URL`, `GITOPS_NODE_NAME`, and `STEWARD_DATA_DIR` to the absolute path whose `stacks/steward` subdirectory is this clone (e.g. if the clone is `/opt/steward/stacks/steward`, set `STEWARD_DATA_DIR=/opt/steward`). Add your host identity so files are not root-owned:
+   ```bash
+   echo "STEWARD_UID=$(id -u)" >> .env
+   echo "STEWARD_GID=$(id -g)" >> .env
+   ```
+   SSH (`git@host:path`, `ssh://host/path`) and plain HTTPS are supported; HTTPS URLs with embedded credentials are **not**.
 
-It catches the misconfigurations that otherwise cost hours of debugging — a wrong
-host in `CONTROL_REPO_URL` (e.g. `github.com` where `gitlab.com` was meant), an
-empty or mismatched `known_hosts`, or a missing deploy key — and performs a live
-`git ls-remote` against the control repo so you know SSH actually works. It exits
-non-zero if any check fails.
+2. **Deploy key** — generate a dedicated key (do not reuse `~/.ssh/id_ed25519`):
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/steward_deploy_key -N "" -C "steward@$(hostname)"
+   ```
+   Add `~/.ssh/steward_deploy_key.pub` as a **read-only deploy key**. Read-only is the default on both GitHub and GitLab and is sufficient for every repo — steward never writes to git. (A GitLab *deploy key* (SSH) is not a GitLab *deploy token* (HTTPS); steward uses the deploy key.)
+
+3. **Host-key trust** — pin the control host's key (strict). Verify the fingerprint against the provider's published list first:
+   ```bash
+   ssh-keyscan -t rsa,ecdsa,ed25519 github.com > ~/.ssh/steward_known_hosts
+   ```
+   Referencing a `known_hosts` file switches steward to `StrictHostKeyChecking yes`, so it **must** contain the host key or clones fail with `Host key verification failed`. Omit it to fall back to `accept-new` (trust on first use).
+
+4. **`credentials.yml`** — `cp credentials.yml.example credentials.yml` and point the entry at your control host:
+   ```yaml
+   credentials:
+     - pattern: github.com
+       key_file: /run/secrets/control_key
+   known_hosts_file: /run/secrets/ssh_known_hosts
+   ```
+
+5. **`docker-compose.override.yml`** — `cp docker-compose.override.yml.example docker-compose.override.yml` and set the `file:` paths under `secrets:` to your key and `known_hosts` paths. It mounts `credentials.yml` read-only and declares each key as a Docker secret.
+
+6. **Start & validate**:
+   ```bash
+   docker compose up -d
+   ./scripts/doctor.sh
+   ```
+
+The diagnostic script checks host config and the running container, performs a live `git ls-remote` against the control repo, and prints a pass / warn / fail summary (exiting non-zero on failure). It catches the misconfigurations that otherwise cost hours — a wrong host in `CONTROL_REPO_URL` (e.g. `github.com` where `gitlab.com` was meant), an empty or mismatched `known_hosts`, or a missing deploy key.
 
 ---
 
-## Advanced: multiple deploy keys
+## Advanced: per-repo & multi-host keys
 
-If your control repo and app repos are on different git hosts and need separate keys, use `credentials.yml` to map each host to its secret.
+`credentials.yml` maps each git host — or a per-repo **SSH alias** — to its own deploy key. steward turns each entry into a `Host` block in the container's `~/.ssh/config`; key selection is done entirely by SSH.
 
-**1. Create `credentials.yml`** on the host (e.g. `/etc/steward/credentials.yml`):
+### Multiple git hosts
+
+When the control repo and app repos live on different hosts (e.g. GitHub + GitLab), give each host its own key:
 
 ```yaml
 credentials:
@@ -140,14 +118,52 @@ credentials:
   - pattern: gitlab.com
     key_file: /run/secrets/gitlab_key
 # Optional. If set, steward enforces StrictHostKeyChecking=yes and this file
-# MUST contain the host key for every git host above (see Quick start step 4).
-# Remove this line to use accept-new (trust on first use) instead.
+# MUST contain the host key for every host above. Remove it to use accept-new.
 known_hosts_file: /run/secrets/ssh_known_hosts
 ```
 
-**2. Edit `docker-compose.override.yml`** — uncomment Option B in the file (or use the commented block in `docker-compose.override.yml.example` as reference).
+### Multiple repos on the same host (per-repo keys)
 
-When `credentials.yml` is present, steward uses it and ignores the single-key `ssh_key` secret.
+GitHub rejects reusing a deploy key across repositories, so each GitHub repo needs its **own** key. Because SSH selects keys by host, give each extra repo a unique **host alias** via `hostname`:
+
+```yaml
+credentials:
+  - pattern: github.com            # control repo — the default github.com key
+    key_file: /run/secrets/control_key
+  - pattern: github.com-arr        # alias for the arr stack repo (must be unique)
+    hostname: github.com           # the real host the alias connects to
+    key_file: /run/secrets/arr_key
+known_hosts_file: /run/secrets/ssh_known_hosts
+```
+
+Then reference the alias in that app's manifest so SSH picks the matching key:
+
+```yaml
+repo: git@github.com-arr:you/arr-stack.git
+```
+
+`known_hosts` still only needs the real host (`github.com`) — aliases resolve to it via `HostName`.
+
+For every key, declare a matching Docker secret in `docker-compose.override.yml`:
+
+```yaml
+services:
+  steward:
+    secrets:
+      - control_key
+      - arr_key
+      - ssh_known_hosts
+
+secrets:
+  control_key:
+    file: /home/you/.ssh/steward_deploy_key
+  arr_key:
+    file: /home/you/.ssh/steward_arr_key
+  ssh_known_hosts:
+    file: /home/you/.ssh/steward_known_hosts
+```
+
+When `credentials.yml` is present, steward uses it and ignores the legacy single-key `ssh_key` secret.
 
 ---
 
@@ -217,9 +233,31 @@ Compatibility notes:
 
 Steward exclusively uses SSH deploy keys for private repo access. HTTPS URLs with embedded tokens are **not supported**.
 
-### Docker secrets (single key)
+### credentials.yml (recommended)
 
-For a single-key setup, declare the secrets in `docker-compose.override.yml` — **not** the base `docker-compose.yml` (which has no hardcoded secret paths to avoid startup failures on hosts where the files don't exist):
+The setup script and the recommended manual path both use `credentials.yml`, which maps each git host (or per-repo alias) to a Docker-secret key file and is mounted read-only into the container:
+
+```yaml
+services:
+  steward:
+    volumes:
+      - ./credentials.yml:/app/credentials.yml:ro
+    secrets:
+      - control_key
+      - ssh_known_hosts
+
+secrets:
+  control_key:
+    file: /home/you/.ssh/steward_deploy_key
+  ssh_known_hosts:
+    file: /home/you/.ssh/steward_known_hosts
+```
+
+Declare secrets in `docker-compose.override.yml` — **not** the base `docker-compose.yml` (which has no hardcoded secret paths, to avoid startup failures on hosts where the files don't exist). For host aliases, multiple keys, and the manifest URL changes they require, see [Advanced: per-repo & multi-host keys](#advanced-per-repo--multi-host-keys).
+
+### Legacy single-key secret
+
+Without `credentials.yml`, steward falls back to a single `ssh_key` secret applied to all hosts:
 
 ```yaml
 services:
@@ -235,11 +273,7 @@ secrets:
     file: /home/you/.ssh/known_hosts
 ```
 
-The entrypoint reads `/run/secrets/ssh_key` at startup and configures SSH automatically.
-
-### Multiple hosts / keys
-
-Use `credentials.yml` to map different deploy keys to different git hosts. See [Advanced: multiple deploy keys](#advanced-multiple-deploy-keys) for the full setup.
+The entrypoint reads `/run/secrets/ssh_key` at startup and configures SSH automatically. This path cannot do per-repo keys — prefer `credentials.yml`.
 
 ### Use SSH URLs in manifests
 
