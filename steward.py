@@ -69,17 +69,28 @@ def _container_mounts() -> list[dict]:
     return []
 
 
+def _is_under(path: str, parent: str) -> bool:
+    """True when path equals parent or is a path-boundary-safe descendant of it.
+
+    Plain str.startswith() would let a mount destination of "/opt/gitops" match
+    "/opt/gitopsdata/x.env", which shares the prefix but is not actually nested
+    under it.
+    """
+    return path == parent or path.startswith(parent.rstrip("/") + "/")
+
+
 def _find_best_mount(container_path: Path) -> tuple[dict, str]:
     """Return (best_mount_dict, rel_path) for the mount covering container_path."""
     mounts = _container_mounts()
+    path_str = str(container_path)
     best: dict = {}
-    best_len = 0
+    best_dest = ""
     for mount in mounts:
         dest = mount.get("Destination", "")
-        if str(container_path).startswith(dest) and len(dest) > best_len:
+        if _is_under(path_str, dest) and len(dest) > len(best_dest):
             best = mount
-            best_len = len(dest)
-    rel = str(container_path)[best_len:].lstrip("/") if best_len else ""
+            best_dest = dest
+    rel = path_str[len(best_dest) :].lstrip("/") if best_dest else ""
     return best, rel
 
 
@@ -93,7 +104,10 @@ def host_path(container_path: Path) -> str:
         return "<host path unknown>"
     source = best.get("Source", "")
     name = best.get("Name", "")
-    outside = source + ("/" + rel if rel else "")
+    if not source:
+        outside = "<no host source>"
+    else:
+        outside = source + ("/" + rel if rel else "")
     if name:
         return f"{outside}  [volume: {name}]"
     return outside
@@ -102,13 +116,17 @@ def host_path(container_path: Path) -> str:
 def _resolve_host_path(container_path: Path) -> Optional[str]:
     """
     Resolve a container path to its host filesystem path.
-    Returns None if the path is not covered by any mount or docker inspect failed.
+    Returns None if the path is not covered by any mount, the covering mount
+    has no host-side source (e.g. tmpfs or an anonymous mount), or docker
+    inspect failed.
     Used for constructing bind-mount arguments for peer containers.
     """
     best, rel = _find_best_mount(container_path)
     if not best:
         return None
     source = best.get("Source", "")
+    if not source:
+        return None
     return source + ("/" + rel if rel else "")
 
 
@@ -125,6 +143,36 @@ def log_mounts() -> None:
         dst = m.get("Destination", "?")
         mode = m.get("Mode", "")
         log.debug("  [%s] %s → %s  (%s)", mtype, src, dst, mode)
+
+
+def _log_compose_path_mode() -> None:
+    """Log whether compose applies can use host paths through the peer helper.
+
+    This is diagnostic only. A failure to inspect the steward container must
+    never prevent reconciliation from starting.
+    """
+    try:
+        host_root = _resolve_host_path(GITOPS_ROOT)
+        if host_root is None:
+            log.warning(
+                "Compose path mode unavailable: relative bind mounts cannot be guaranteed; "
+                "AGENT_CONTAINER_NAME is currently '%s'; set AGENT_CONTAINER_NAME to the real container name",
+                AGENT_CONTAINER_NAME,
+            )
+        elif host_root != str(GITOPS_ROOT):
+            log.info(
+                "Compose path mode: container root=%s, host root=%s; "
+                "compose applies use the peer helper",
+                GITOPS_ROOT,
+                host_root,
+            )
+        else:
+            log.debug(
+                "Compose path mode: root paths match; direct compose is used unless "
+                "an app has a more-specific mount"
+            )
+    except Exception as exc:
+        log.warning("Compose path mode check failed; continuing startup: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -753,8 +801,13 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
     the running container before the replacement is created. The helper is independent of
     steward's process, so the kill does not abort the compose operation.
 
-    Falls back to run_compose() if host paths cannot be resolved (e.g. in dev/test setups
-    where AGENT_CONTAINER_NAME does not match a real container).
+    Falls back to run_compose() if host_root, the app workdir, or the main compose file
+    cannot be resolved (e.g. in dev/test setups where AGENT_CONTAINER_NAME does not match
+    a real container). An unresolvable override file or configured env_file is never a
+    fallback case: silently dropping either would restart steward with a different stack
+    definition than the one on disk — and the node-local override is what carries SSH
+    mounts and port bindings, so a steward that comes back without it may not be able to
+    sync or self-heal.
     """
     helper_image = _get_helper_image()
     if not helper_image:
@@ -762,85 +815,42 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
             "Self-update: docker inspect '%s' returned no image — falling back to direct compose",
             AGENT_CONTAINER_NAME,
         )
-        return run_compose(app, stack_path)
+        return _run_compose_direct(app, stack_path)
 
-    # Translate the container-internal compose file path to the host filesystem path.
-    # The helper runs as a peer container and can only see host paths.
-    container_compose_file = stack_path / app.path / app.compose_file
-    host_compose_file = _resolve_host_path(container_compose_file)
-    host_root = _resolve_host_path(GITOPS_ROOT)
-
-    if not host_compose_file or not host_root:
+    paths, reason = _resolve_compose_host_paths(app, stack_path)
+    if reason in _PEER_FALLBACK_REASONS:
         log.warning(
             "Self-update: cannot resolve host paths (AGENT_CONTAINER_NAME='%s') — falling back to direct compose",
             AGENT_CONTAINER_NAME,
         )
-        return run_compose(app, stack_path)
+        return _run_compose_direct(app, stack_path)
+    if reason == "override":
+        log.error(
+            "Self-update: docker-compose.override.yml found but its host path could not "
+            "be resolved — refusing to restart without it (secrets or SSH mounts may be missing)"
+        )
+        return False
+    if reason == "env_file":
+        log.error(
+            "Self-update: cannot resolve host path for env_file '%s' — refusing to restart without it",
+            app.env_file,
+        )
+        return False
+    if reason:
+        log.error("Self-update: cannot resolve host paths for compose apply (reason=%s)", reason)
+        return False
 
-    inner_parts = [
-        "docker",
-        "compose",
-        "--project-name",
-        shlex.quote(app.name),
-        "-f",
-        shlex.quote(host_compose_file),
-    ]
-
-    # Include override file if present so secrets and host-specific settings survive self-update.
-    # Docker Compose only auto-discovers override files when no explicit -f is given.
-    container_override_file = stack_path / app.path / "docker-compose.override.yml"
-    if container_override_file.exists():
-        host_override_file = _resolve_host_path(container_override_file)
-        if host_override_file:
-            inner_parts += ["-f", shlex.quote(host_override_file)]
-            log.debug("Self-update: including override file %s", host_override_file)
-        else:
-            log.warning(
-                "Self-update: override file found but host path could not be resolved — secrets may be missing"
-            )
-
-    if app.env_file:
-        host_env = _resolve_host_path(Path(app.env_file))
-        if host_env:
-            inner_parts += ["--env-file", shlex.quote(host_env)]
-        else:
-            log.warning(
-                "Self-update: cannot resolve host path for env_file '%s', omitting from helper",
-                app.env_file,
-            )
-    inner_parts += [
-        "up",
-        "-d",
-        "--remove-orphans",
-        "--pull",
-        shlex.quote(app.pull_policy),
-    ]
-
-    inner_cmd = " ".join(inner_parts)
-
-    helper_run = [
-        "docker",
-        "run",
-        "--rm",
-        "-d",
-        "--entrypoint",
-        "sh",
-        "-v",
-        "/var/run/docker.sock:/var/run/docker.sock",
-        "-v",
-        f"{host_root}:{host_root}",
-        "-e",
-        "HOME=/tmp",
-        helper_image,
-        "-c",
-        f"sleep 5 && timeout 300 {inner_cmd}",
-    ]
+    inner = _build_compose_up_cmd(app, paths.compose_files, paths.env_file)
 
     log.info("Self-update: spawning helper container (image=%s)", helper_image)
-    log.debug("Helper command: %s", " ".join(helper_run))
 
     try:
-        result = subprocess.run(helper_run, capture_output=True, text=True, timeout=30)
+        result = _run_peer_compose(app, inner, paths.bind_specs, detach=True, delay=5)
+        if result is None:
+            log.warning(
+                "Self-update: no peer helper image available — falling back to direct compose"
+            )
+            return _run_compose_direct(app, stack_path)
         if result.returncode != 0:
             log.error("Self-update: failed to start helper: %s", result.stderr.strip())
             return False
@@ -849,13 +859,19 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
             result.stdout.strip()[:12],
         )
         return True
-    except Exception as e:
-        log.error("Self-update: error launching helper: %s", e)
+    except subprocess.TimeoutExpired:
+        log.error("Self-update: helper launch timed out")
+        return False
+    except FileNotFoundError:
+        log.error("Self-update: Docker not found — is Docker installed?")
+        return False
+    except Exception as exc:
+        log.error("Self-update: error launching helper (%s)", type(exc).__name__)
         return False
 
 
-def _compose_file_args(app: AppManifest, stack_path: Path) -> list[str]:
-    """Return the -f arguments for docker compose, including override if present.
+def _compose_files(app: AppManifest, stack_path: Path) -> list[str]:
+    """Return the compose file paths for this app: main file, plus override if present.
 
     Docker Compose only auto-loads docker-compose.override.yml when no explicit -f
     is supplied.  Because steward always passes an explicit -f (to support custom
@@ -863,15 +879,231 @@ def _compose_file_args(app: AppManifest, stack_path: Path) -> list[str]:
     passed explicitly to preserve host-specific settings such as SSH secrets.
     """
     compose_file = stack_path / app.path / app.compose_file
-    args = ["-f", str(compose_file)]
+    files = [str(compose_file)]
     override_file = stack_path / app.path / "docker-compose.override.yml"
     if override_file.exists():
-        args += ["-f", str(override_file)]
+        files.append(str(override_file))
         log.debug("App '%s': including override file %s", app.name, override_file)
+    return files
+
+
+def _compose_file_args(app: AppManifest, stack_path: Path) -> list[str]:
+    """Return the -f arguments for docker compose, including override if present."""
+    args: list[str] = []
+    for f in _compose_files(app, stack_path):
+        args += ["-f", f]
     return args
 
 
-def run_compose(app: AppManifest, stack_path: Path) -> bool:
+@dataclass
+class PeerComposePaths:
+    """Host-resolved inputs needed to run docker compose from a peer container.
+
+    compose_files and env_file are host paths (no -f markers, no quoting).
+    bind_specs are ready-to-use "-v" values (order-preserving, deduplicated).
+    """
+
+    host_root: str
+    host_workdir: str
+    compose_files: list[str]
+    env_file: Optional[str]
+    bind_specs: list[str]
+
+
+# Reasons _resolve_compose_host_paths() can fail with. Self-update's peer path
+# may fall back to direct compose only for these — they mean "no working peer
+# view of the filesystem exists" (e.g. dev/test setups where
+# AGENT_CONTAINER_NAME does not match a real container). An unresolvable
+# override or env_file is deliberately excluded: silently dropping either
+# would run a different stack definition than the one on disk (see plan D1).
+_PEER_FALLBACK_REASONS = frozenset({"host_root", "workdir", "compose_file"})
+
+
+def _resolve_compose_host_paths(
+    app: AppManifest, stack_path: Path
+) -> tuple[Optional[PeerComposePaths], str]:
+    """
+    Resolve every host-side path a peer compose invocation needs.
+
+    Returns (paths, reason). On success reason is "" and paths is populated.
+    On failure paths is None and reason names what could not be resolved:
+    "host_root", "workdir", "compose_file", "override", or "env_file".
+    """
+    host_root = _resolve_host_path(GITOPS_ROOT)
+    if not host_root:
+        return None, "host_root"
+
+    container_workdir = stack_path / app.path
+    host_workdir = _resolve_host_path(container_workdir)
+    if not host_workdir:
+        return None, "workdir"
+
+    container_compose_file = container_workdir / app.compose_file
+    host_compose_file = _resolve_host_path(container_compose_file)
+    if not host_compose_file:
+        return None, "compose_file"
+    compose_files = [host_compose_file]
+
+    container_override_file = container_workdir / "docker-compose.override.yml"
+    if container_override_file.exists():
+        host_override_file = _resolve_host_path(container_override_file)
+        if not host_override_file:
+            return None, "override"
+        compose_files.append(host_override_file)
+        log.debug("App '%s': including override file %s", app.name, host_override_file)
+
+    env_file: Optional[str] = None
+    if app.env_file:
+        container_env_file = Path(app.env_file)
+        if not container_env_file.exists():
+            return None, "env_file"
+        env_file = _resolve_host_path(container_env_file)
+        if not env_file:
+            return None, "env_file"
+
+    bind_specs: list[str] = []
+    for spec in (f"{host_root}:{host_root}", f"{host_workdir}:{host_workdir}"):
+        if spec not in bind_specs:
+            bind_specs.append(spec)
+
+    extra_files = list(compose_files)
+    if env_file:
+        extra_files.append(env_file)
+    for host_file in extra_files:
+        if _is_under(host_file, host_root) or _is_under(host_file, host_workdir):
+            continue
+        spec = f"{host_file}:{host_file}:ro"
+        if spec not in bind_specs:
+            bind_specs.append(spec)
+
+    return (
+        PeerComposePaths(
+            host_root=host_root,
+            host_workdir=host_workdir,
+            compose_files=compose_files,
+            env_file=env_file,
+            bind_specs=bind_specs,
+        ),
+        "",
+    )
+
+
+def _peer_env_args() -> list[str]:
+    """Build "-e KEY=VALUE" args forwarding steward's environment to a peer container.
+
+    The direct compose path passes env=os.environ.copy(), so ${VAR} interpolation
+    in stack compose files resolves against steward's runtime environment. The
+    image declares no ENV, so without forwarding, a peer would silently lose
+    vars like GITOPS_NODE_NAME / STEWARD_UID / STEWARD_GID / HOSTNAME.
+
+    HOME is excluded and re-appended last (so it always wins): the peer needs
+    its own throwaway HOME, not steward's. DOCKER_* is excluded because
+    DOCKER_HOST / DOCKER_CONFIG would redirect or break the peer's docker
+    client, which must use the mounted socket.
+    """
+    args: list[str] = []
+    for key, value in os.environ.items():
+        if key == "HOME" or key.startswith("DOCKER_"):
+            continue
+        args += ["-e", f"{key}={value}"]
+    args += ["-e", "HOME=/tmp"]
+    return args
+
+
+def _redact_peer_cmd(cmd: list[str]) -> str:
+    """Join a peer docker run command for logging, redacting the value of every -e.
+
+    _peer_env_args() forwards steward's process environment into this command,
+    which may contain operator secrets. Every log statement that prints a peer
+    command must go through this instead of a plain join, since README.md
+    tells operators to run at LOGLEVEL=DEBUG for path diagnostics.
+    """
+    parts: list[str] = []
+    redact_next = False
+    for token in cmd:
+        if redact_next:
+            parts.append(token.split("=", 1)[0])
+            redact_next = False
+        else:
+            parts.append(token)
+        redact_next = redact_next or token == "-e"
+    return " ".join(parts)
+
+
+def _build_compose_up_cmd(
+    app: AppManifest, compose_files: list[str], env_file: Optional[str]
+) -> list[str]:
+    """Build the docker compose up argv, shared by the direct and peer paths.
+
+    Unquoted argv in, unquoted argv out — only _run_peer_compose() shell-quotes,
+    so the direct and peer paths can never drift in which flags they pass.
+    """
+    cmd = ["docker", "compose", "--project-name", app.name]
+    for f in compose_files:
+        cmd += ["-f", f]
+    if env_file:
+        cmd += ["--env-file", env_file]
+    cmd += ["up", "-d", "--remove-orphans", "--pull", app.pull_policy]
+    return cmd
+
+
+_PEER_INNER_TIMEOUT_S = 300  # timeout(1) budget applied inside the peer container
+_PEER_SPAWN_TIMEOUT_S = 30  # subprocess.run(timeout=) for a detached (self-update) spawn
+_PEER_RUN_TIMEOUT_S = 310  # subprocess.run(timeout=) for a foreground (regular app) run
+
+
+def _run_peer_compose(
+    app: AppManifest,
+    inner_cmd: list[str],
+    bind_specs: list[str],
+    *,
+    detach: bool,
+    delay: int,
+) -> Optional[subprocess.CompletedProcess]:
+    """
+    Run inner_cmd (a docker compose argv) inside a short-lived peer container.
+
+    Returns None only when no peer image is available (_get_helper_image()) —
+    that is the sole meaning of a None return. Does not catch
+    subprocess.TimeoutExpired or FileNotFoundError; callers keep their
+    context-specific logging and bool return behavior.
+    """
+    helper_image = _get_helper_image()
+    if not helper_image:
+        return None
+
+    inner_shell = shlex.join(inner_cmd)
+    script = f"timeout {_PEER_INNER_TIMEOUT_S} {inner_shell}"
+    if detach and delay:
+        script = f"sleep {delay} && {script}"
+
+    bind_args: list[str] = []
+    for spec in bind_specs:
+        bind_args += ["-v", spec]
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        *(["-d"] if detach else []),
+        "--entrypoint",
+        "sh",
+        "-v",
+        "/var/run/docker.sock:/var/run/docker.sock",
+        *bind_args,
+        *_peer_env_args(),
+        helper_image,
+        "-c",
+        script,
+    ]
+
+    log.debug("Peer compose command for app '%s': %s", app.name, _redact_peer_cmd(cmd))
+
+    timeout = _PEER_SPAWN_TIMEOUT_S if detach else _PEER_RUN_TIMEOUT_S
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _run_compose_impl(app: AppManifest, stack_path: Path, *, force_direct: bool) -> bool:
     """
     Run docker compose with an explicit project name and configured pull policy.
     Returns True on success, False on failure.
@@ -884,15 +1116,14 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
         log.error("Compose file not found: %s", compose_file)
         return False
 
-    cmd = [
-        "docker",
-        "compose",
-        "--project-name",
-        app.name,
-        *_compose_file_args(app, stack_path),
-    ]
+    host_root = None if force_direct else _resolve_host_path(GITOPS_ROOT)
+    container_workdir = stack_path / app.path
+    host_workdir = _resolve_host_path(container_workdir) if host_root is not None else None
+    use_peer = False
+    if not force_direct and host_root is not None:
+        use_peer = host_root != str(GITOPS_ROOT) or host_workdir != str(container_workdir)
 
-    env = os.environ.copy()
+    env_path: Optional[Path] = None
     if app.env_file:
         env_path = Path(app.env_file)
         log.debug("App '%s' | inside  env_file: %s", app.name, env_path)
@@ -905,41 +1136,89 @@ def run_compose(app: AppManifest, stack_path: Path) -> bool:
                 host_path(env_path),
             )
             return False
-        cmd.extend(["--env-file", str(env_path)])
 
-    cmd.extend(["up", "-d", "--remove-orphans", "--pull", app.pull_policy])
-
-    log.info("Reconciling app '%s': %s", app.name, " ".join(cmd))
-
-    workdir = stack_path / app.path
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            env=env,
-            cwd=str(workdir),
-            timeout=300,
+    if not use_peer:
+        cmd = _build_compose_up_cmd(
+            app,
+            _compose_files(app, stack_path),
+            str(env_path) if env_path else None,
         )
-        if result.stdout:
-            for line in result.stdout.strip().splitlines():
-                log.info("[compose/%s] %s", app.name, line)
-        if result.stderr:
-            for line in result.stderr.strip().splitlines():
-                log.warning("[compose/%s] %s", app.name, line)
-        if result.returncode != 0:
+        env = os.environ.copy()
+        log.info("Reconciling app '%s': %s", app.name, " ".join(cmd))
+
+        workdir = stack_path / app.path
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=str(workdir),
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            log.error("docker compose timed out for app '%s'", app.name)
+            return False
+        except FileNotFoundError:
+            log.error("docker compose not found — is Docker installed?")
+            return False
+    else:
+        paths, reason = _resolve_compose_host_paths(app, stack_path)
+        if reason or paths is None:
             log.error(
-                "docker compose exited with code %d for app '%s'", result.returncode, app.name
+                "Cannot resolve host paths for compose app '%s' (reason=%s)",
+                app.name,
+                reason or "unknown",
             )
             return False
-        return True
-    except subprocess.TimeoutExpired:
-        log.error("docker compose timed out for app '%s'", app.name)
+
+        cmd = _build_compose_up_cmd(app, paths.compose_files, paths.env_file)
+        log.info(
+            "Reconciling app '%s' via peer helper: %s",
+            app.name,
+            _redact_peer_cmd(cmd),
+        )
+
+        try:
+            result = _run_peer_compose(
+                app,
+                cmd,
+                paths.bind_specs,
+                detach=False,
+                delay=0,
+            )
+        except subprocess.TimeoutExpired:
+            log.error("docker compose timed out for app '%s'", app.name)
+            return False
+        except FileNotFoundError:
+            log.error("docker compose not found — is Docker installed?")
+            return False
+
+        if result is None:
+            log.error("No peer helper image available for app '%s'", app.name)
+            return False
+
+    if result.stdout:
+        for line in result.stdout.strip().splitlines():
+            log.info("[compose/%s] %s", app.name, line)
+    if result.stderr:
+        for line in result.stderr.strip().splitlines():
+            log.warning("[compose/%s] %s", app.name, line)
+    if result.returncode != 0:
+        log.error("docker compose exited with code %d for app '%s'", result.returncode, app.name)
         return False
-    except FileNotFoundError:
-        log.error("docker compose not found — is Docker installed?")
-        return False
+    return True
+
+
+def run_compose(app: AppManifest, stack_path: Path) -> bool:
+    """Run Compose using peer mode when host paths require it."""
+    return _run_compose_impl(app, stack_path, force_direct=False)
+
+
+def _run_compose_direct(app: AppManifest, stack_path: Path) -> bool:
+    """Run Compose directly with container-internal paths for self-update fallback."""
+    return _run_compose_impl(app, stack_path, force_direct=True)
 
 
 def _load_compose_services_status(app: AppManifest, stack_path: Path) -> Optional[list[dict]]:
@@ -1541,6 +1820,7 @@ def reconcile() -> int:
     log.debug("inside  STACKS_DIR     : %s", STACKS_DIR)
     log.debug("outside STACKS_DIR     : %s", host_path(STACKS_DIR))
     log_mounts()
+    _log_compose_path_mode()
 
     # Step 1: sync control repo
     try:
