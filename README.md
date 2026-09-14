@@ -271,6 +271,8 @@ The helper is a peer container, independent of steward's process. When Docker Co
 
 The same peer-container mechanism is also used for **regular managed apps** whenever the app's container path differs from its host path. Steward passes host-side compose file paths and mounts the host project directory into the peer, so relative bind sources such as `./config:/etc/app/config:ro` are resolved by Compose against the real host directory instead of the steward container's `/git` path. More-specific app/workdir mounts are considered as well.
 
+Compose's implicit project `.env` behavior is preserved as well. If that file is supplied through a separate or more-specific mount, steward binds the resolved host source to the peer's expected `<project-directory>/.env` path rather than converting it to an explicit `--env-file` option.
+
 The startup path-mode guard logs whether direct Compose or the peer helper is being used. `AGENT_CONTAINER_NAME` must match the actual steward container name so Docker inspection can resolve the mount map. If inspection cannot resolve the root, steward continues with a direct compatibility path, but relative bind mounts cannot be guaranteed in that mode. Self-update also uses a direct fallback when a peer helper cannot be prepared; this fallback may terminate the current steward container, after which `restart: unless-stopped` brings it back.
 
 Node-local `docker-compose.override.yml` files and configured `compose_env_file` files are never silently dropped when their host paths cannot be resolved. Steward fails that app reconcile instead of applying a different stack definition.

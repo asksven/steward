@@ -146,7 +146,7 @@ def log_mounts() -> None:
 
 
 def _log_compose_path_mode() -> None:
-    """Log whether compose applies can use host paths through the peer helper.
+    """Log whether Compose can use host paths through the peer helper.
 
     This is diagnostic only. A failure to inspect the steward container must
     never prevent reconciliation from starting.
@@ -801,22 +801,13 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
     the running container before the replacement is created. The helper is independent of
     steward's process, so the kill does not abort the compose operation.
 
-    Falls back to run_compose() if host_root, the app workdir, or the main compose file
-    cannot be resolved (e.g. in dev/test setups where AGENT_CONTAINER_NAME does not match
-    a real container). An unresolvable override file or configured env_file is never a
-    fallback case: silently dropping either would restart steward with a different stack
-    definition than the one on disk — and the node-local override is what carries SSH
-    mounts and port bindings, so a steward that comes back without it may not be able to
-    sync or self-heal.
+    Falls back to _run_compose_direct() if host_root, the app workdir, the main compose
+    file, or the helper image cannot be resolved. An unresolvable override, configured
+    env_file, or implicit project .env is never a fallback case: silently dropping any
+    of them would restart steward with a different stack definition than the one on
+    disk — and the node-local override is what carries SSH mounts and port bindings,
+    so a steward that comes back without it may not be able to sync or self-heal.
     """
-    helper_image = _get_helper_image()
-    if not helper_image:
-        log.warning(
-            "Self-update: docker inspect '%s' returned no image — falling back to direct compose",
-            AGENT_CONTAINER_NAME,
-        )
-        return _run_compose_direct(app, stack_path)
-
     paths, reason = _resolve_compose_host_paths(app, stack_path)
     if reason in _PEER_FALLBACK_REASONS:
         log.warning(
@@ -836,9 +827,22 @@ def spawn_compose_helper(app: AppManifest, stack_path: Path) -> bool:
             app.env_file,
         )
         return False
+    if reason == "project_env":
+        log.error(
+            "Self-update: cannot resolve host path for implicit project .env — refusing to restart without it"
+        )
+        return False
     if reason:
         log.error("Self-update: cannot resolve host paths for compose apply (reason=%s)", reason)
         return False
+
+    helper_image = _get_helper_image()
+    if not helper_image:
+        log.warning(
+            "Self-update: docker inspect '%s' returned no image — falling back to direct compose",
+            AGENT_CONTAINER_NAME,
+        )
+        return _run_compose_direct(app, stack_path)
 
     inner = _build_compose_up_cmd(app, paths.compose_files, paths.env_file)
 
@@ -914,8 +918,9 @@ class PeerComposePaths:
 # may fall back to direct compose only for these — they mean "no working peer
 # view of the filesystem exists" (e.g. dev/test setups where
 # AGENT_CONTAINER_NAME does not match a real container). An unresolvable
-# override or env_file is deliberately excluded: silently dropping either
-# would run a different stack definition than the one on disk (see plan D1).
+# override, env_file, or project_env is deliberately excluded: silently
+# dropping any of them would run a different stack definition than the one on
+# disk (see plan D1/D5).
 _PEER_FALLBACK_REASONS = frozenset({"host_root", "workdir", "compose_file"})
 
 
@@ -927,7 +932,8 @@ def _resolve_compose_host_paths(
 
     Returns (paths, reason). On success reason is "" and paths is populated.
     On failure paths is None and reason names what could not be resolved:
-    "host_root", "workdir", "compose_file", "override", or "env_file".
+    "host_root", "workdir", "compose_file", "override", "env_file", or
+    "project_env".
     """
     host_root = _resolve_host_path(GITOPS_ROOT)
     if not host_root:
@@ -953,6 +959,7 @@ def _resolve_compose_host_paths(
         log.debug("App '%s': including override file %s", app.name, host_override_file)
 
     env_file: Optional[str] = None
+    project_env_bind: Optional[str] = None
     if app.env_file:
         container_env_file = Path(app.env_file)
         if not container_env_file.exists():
@@ -960,11 +967,22 @@ def _resolve_compose_host_paths(
         env_file = _resolve_host_path(container_env_file)
         if not env_file:
             return None, "env_file"
+    else:
+        container_project_env = container_workdir / ".env"
+        if container_project_env.exists():
+            host_project_env = _resolve_host_path(container_project_env)
+            if not host_project_env:
+                return None, "project_env"
+            peer_project_env = str(Path(host_workdir) / ".env")
+            if host_project_env != peer_project_env:
+                project_env_bind = f"{host_project_env}:{peer_project_env}:ro"
 
     bind_specs: list[str] = []
     for spec in (f"{host_root}:{host_root}", f"{host_workdir}:{host_workdir}"):
         if spec not in bind_specs:
             bind_specs.append(spec)
+    if project_env_bind:
+        bind_specs.append(project_env_bind)
 
     extra_files = list(compose_files)
     if env_file:

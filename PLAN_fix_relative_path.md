@@ -1,14 +1,14 @@
 # Plan: Fix relative bind-mount paths in managed stacks (Option B — transparent)
 
-Status: **Steps 0-7 and §5 Docs complete.** Target repo: `asksven/steward`
+Status: **Steps 0-8 and §5 Docs complete.** Target repo: `asksven/steward`
 (this repo). Executor: implement exactly as written; do not change the
 deployment model (no migration). Follow the repo conventions in
 `.github/copilot-instructions.md`.
 
 All `steward.py:NNN` and `tests/test_steward.py:NNN` references below were
-re-verified against the tree **after Steps 0-7 and §5 Docs landed**. Read the cited code
+re-verified against the tree **after Steps 0-8 and §5 Docs landed**. Read the cited code
 before editing it. If a reference looks off, `grep` for the symbol rather than
-trusting the number — the file has already grown 1680 → 1960 lines during
+trusting the number — the file has already grown 1680 → 1978 lines during
 implementation.
 
 ---
@@ -21,6 +21,7 @@ implementation.
 | D2 | Steward's process environment **is forwarded** to the peer as repeated `-e KEY=VALUE`, excluding `HOME` and every `DOCKER_*` key. `-e HOME=/tmp` is appended last. |
 | D3 | The two latent mount-resolution bugs in `_find_best_mount()` / `_resolve_host_path()` are **fixed in this change**. |
 | D4 | Peer command logging is **split by level**: callers log the *inner* `docker compose` argv at their own level (INFO in `run_compose`, matching the direct path); `_run_peer_compose()` keeps its own DEBUG line for the *outer* `docker run` wrapper. Both go through `_redact_peer_cmd()`. |
+| D5 | When no explicit `compose_env_file` is configured, preserve Compose's implicit project `.env` behavior. If `.env` comes from a separate/more-specific mount, bind its resolved host source to `<host_workdir>/.env:ro`; keep `PeerComposePaths.env_file=None` and do **not** convert it to `--env-file`. |
 
 ---
 
@@ -36,10 +37,11 @@ implementation.
 | 5 — Startup guard | ✅ done | `_log_compose_path_mode()` steward.py:148; call after `log_mounts()` at :1823. |
 | 6 — Call sites unchanged | ✅ done | Verified `sync_app()` at :1427-1430 and the self-heal ternary at :1619-1621; no edits required. |
 | 7 — Review remediation | ✅ done | 7.1-7.7 implemented; 7.8 assessed and retained as a manual Compose verification gate. |
-| §4 tests | ✅ done | Step 7 regression coverage is complete; 153 tests pass. |
+| 8 — Copilot review remediation | ✅ done | D5 implicit `.env`, strict validation ordering, tests, docstrings, README, and plan cleanup implemented. No commit or push. |
+| §4 tests | ✅ done | Step 8 regression coverage is complete; current baseline: 161. |
 | §5 docs | ✅ done | README updated with peer Compose behavior, mount-backed `compose_env_file` requirements, startup guard, and redacted peer logging. |
 
-**Green baseline: 153 tests passing.** Any drop is a regression you introduced.
+**Green baseline: 161 tests passing.** Any drop is a regression you introduced.
 
 **Tooling — this sandbox has no `uv`, no `pip`, no `ensurepip`.** A gitignored
 `.venv` is already bootstrapped with `requirements.txt` + `pytest` + `ruff`. Use
@@ -398,13 +400,12 @@ change — there is nothing to edit here, just confirm both sites still read as
 before. Verified against the current tree; `git diff` contains no changes to
 either call site.
 
-### Step 7 — Post-review remediation (blockers + should-fix) ⬅ NEXT TASK
+### Step 7 — Post-review remediation (blockers + should-fix) ✅ DONE
 
 The Steps 0-6 review found three release blockers and associated should-fix
-coverage and diagnostic items.
-Implement this step **before README changes, manual deployment, or rollout**.
-The current green baseline is 146 tests; that does not prove the items below —
-the first two blockers were reproduced against the current implementation.
+coverage and diagnostic items. They were implemented before this Copilot review.
+The first two blockers were reproduced against the earlier implementation and
+are retained below as historical implementation context.
 
 #### 7.1 — BLOCKER: make self-update fallbacks genuinely direct ✅ DONE
 
@@ -646,15 +647,186 @@ Before marking Step 7 complete:
 **Step 7 result:** 7.1-7.7 are implemented with regression tests; 7.8 is
 assessed per the no-daemon rule above. The current full-suite baseline is 153.
 
+### Step 8 — GitHub Copilot review remediation ✅ DONE
+
+Source review: <https://github.com/asksven/steward/pull/23#pullrequestreview-5191457806>.
+The review was made against PR head `63f5e462c50b27239152bc58018d3b63ce1c0d9c`;
+local HEAD matches. Implement exactly the two behavioral fixes and three
+documentation corrections below. **Do not commit or push** — the user will do
+that after reviewing the local changes.
+
+#### 8.1 — Preserve implicit project `.env` in peer mode (D5)
+
+Current bug: `_resolve_compose_host_paths()` handles an explicit
+`app.env_file`, but when it is unset it does not inspect
+`container_workdir / ".env"`. Compose normally discovers that file implicitly
+from the directory of the first `-f` compose file. A file-level or
+more-specific mount can therefore expose one `.env` to direct Compose while the
+peer sees the underlying `<host_workdir>/.env` (or no file), silently changing
+interpolation.
+
+Example:
+
+```text
+container /git/stacks/demo       -> host /home/u/git/stacks/demo
+container /git/stacks/demo/.env  -> host /opt/secrets/demo.env
+```
+
+The peer must receive this nested bind:
+
+```text
+/opt/secrets/demo.env:/home/u/git/stacks/demo/.env:ro
+```
+
+Implementation requirements:
+
+1. Extend `_resolve_compose_host_paths()`'s documented failure reasons with
+   `"project_env"`.
+2. Keep explicit `app.env_file` handling unchanged. When it is configured,
+   continue resolving it into `PeerComposePaths.env_file` and pass it through
+   `--env-file`; do not additionally process implicit `.env`.
+3. When `app.env_file` is unset, set
+   `container_project_env = container_workdir / ".env"`.
+4. If that file does not exist in the container, do nothing. Compose retains
+   ordinary implicit discovery from the bound host workdir.
+5. If it exists, resolve its host source with `_resolve_host_path()`.
+   Resolution failure returns `(None, "project_env")`; never silently omit a
+   present interpolation input.
+6. Compute the path where peer Compose will look for it:
+   `peer_project_env = str(Path(host_workdir) / ".env")`.
+7. If the resolved source equals `peer_project_env`, add no file bind; the
+   existing host-workdir directory bind already exposes it.
+8. If they differ, add exactly one read-only nested bind:
+   `f"{host_project_env}:{peer_project_env}:ro"`.
+9. Preserve bind ordering: root directory, workdir directory, implicit project
+   `.env` nested bind (when needed), then any same-path `:ro` compose/override/
+   explicit-env file binds.
+10. Keep `PeerComposePaths.env_file` as `None` for implicit `.env`. The inner
+    command must contain no `--env-file`; converting implicit discovery to an
+    explicit flag can change Compose control-variable and precedence behavior.
+11. Add `"project_env"` to strict self-update handling. Log an error naming the
+    implicit project `.env` and return `False`; never fall back direct after
+    this strict reason is known.
+
+Required tests:
+
+- Resolver: implicit `.env` from a separate source creates exactly one
+  `<source>:<host_workdir>/.env:ro` bind and leaves `paths.env_file is None`.
+- Resolver: implicit `.env` already at `<host_workdir>/.env` creates no
+  redundant file bind.
+- Resolver: present but unresolvable implicit `.env` returns
+  `"project_env"`.
+- End-to-end `run_compose()` peer path: outer `docker run` contains the nested
+  bind; inner shell command contains no `--env-file`.
+- Strictness: a `"project_env"` failure runs neither peer nor direct Compose
+  for regular apps and self-update.
+
+#### 8.2 — Validate strict self-update inputs before missing-image fallback
+
+Copilot inline comment:
+<https://github.com/asksven/steward/pull/23#discussion_r4000255892>.
+
+Current bug: `spawn_compose_helper()` calls `_get_helper_image()` first and
+immediately takes `_run_compose_direct()` when no image is available. That
+bypasses D1/D5 validation for a present override, explicit env file, or implicit
+project `.env` whose host path cannot be resolved.
+
+Reorder `spawn_compose_helper()` as follows:
+
+1. Call `_resolve_compose_host_paths(app, stack_path)` before
+   `_get_helper_image()`.
+2. Handle strict reasons first:
+   - `"override"` → existing override error + `False`.
+   - `"env_file"` → existing configured env-file error + `False`.
+   - `"project_env"` → new implicit `.env` error + `False`.
+3. If the reason is in `_PEER_FALLBACK_REASONS` (`host_root`, `workdir`, main
+   `compose_file`), retain the existing `_run_compose_direct()` fallback. These
+   reasons keep priority under the resolver's first-failure contract.
+4. After successful path resolution, call `_get_helper_image()`.
+5. If no image is available, retain the existing warning and
+   `_run_compose_direct()` fallback. At this point all strict peer inputs have
+   been validated.
+6. Continue building and launching the detached peer exactly as today when
+   paths and image are available.
+7. Preserve the defensive `result is None` direct fallback for the race where
+   the second helper-image lookup inside `_run_peer_compose()` fails.
+8. Do not change regular-app fallback behavior: once peer mode is selected,
+   resolution failure or no image remains an app reconcile failure.
+
+Required tests:
+
+- Missing helper image + all paths valid → actual direct Compose fallback still
+  executes successfully.
+- Missing helper image + `"override"` → `False`; neither
+  `_run_compose_direct()` nor `_run_peer_compose()` runs.
+- Missing helper image + `"env_file"` → same strict result.
+- Missing helper image + `"project_env"` → same strict result.
+- Existing allowed `host_root` / `workdir` / `compose_file` direct-fallback
+  tests remain green.
+- Assert strict-reason validation happens before image lookup, so a future early
+  return cannot reintroduce the bypass.
+
+#### 8.3 — Correct code and plan documentation
+
+1. Copilot inline docstring comment:
+   <https://github.com/asksven/steward/pull/23#discussion_r4000255897>.
+   Change `spawn_compose_helper()`'s docstring from “Falls back to
+   `run_compose()`” to `_run_compose_direct()`. Mention both allowed path
+   resolution failures and an unavailable helper image.
+2. Change `_log_compose_path_mode()`'s docstring from “Log whether compose
+   applies can use...” to “Log whether Compose can use host paths through the
+   peer helper.”
+3. The Step 7 heading/status block was corrected while preparing this handoff;
+   preserve its completed wording.
+4. Add a short README note that peer mode preserves the implicit project `.env`
+   when it is supplied through a separate/more-specific mount. Do not tell users
+   to configure `compose_env_file`; implicit discovery remains supported.
+
+#### Step 8 implementation order
+
+1. Implement 8.1 resolver/bind behavior and its direct unit tests.
+2. Add strict `"project_env"` handling in `spawn_compose_helper()` and
+   `run_compose()` tests.
+3. Reorder `spawn_compose_helper()` per 8.2 and add missing-image/strict-order
+   regression tests.
+4. Apply all 8.3 documentation corrections.
+5. Run formatting, lint, and the complete test suite.
+6. Update the status table, test inventory, current line references, and green
+   baseline.
+7. Stop. **Do not commit, push, update the PR, or request another review.**
+
+#### Step 8 completion gate
+
+Before marking Step 8 complete:
+
+1. Implicit project `.env` is preserved without `--env-file` in both ordinary
+   and separate-mount peer layouts.
+2. A present unresolvable implicit `.env` is a strict failure.
+3. Missing helper image cannot bypass strict override, explicit-env, or
+   project-env validation.
+4. Allowed self-update direct fallbacks and all D1-D5 behavior remain intact.
+5. Both Copilot inline comments and all three suppressed comments are addressed.
+6. Ruff and the complete test suite pass with a count greater than 153.
+7. The final response lists changes and verification only; no commit/push is
+   performed.
+
 ---
 
-## 4. Tests (`tests/test_steward.py`) ✅ DONE FOR STEPS 1-7
+**Step 8 result:** Implicit project `.env` is preserved without an explicit
+`--env-file`; strict path validation precedes the helper-image fallback; the
+Copilot docstring, README, and plan-status findings are addressed. The complete
+suite is 161 passing. No commit, push, PR update, or additional review request
+was performed.
+
+---
+
+## 4. Tests (`tests/test_steward.py`) ✅ DONE FOR STEPS 1-8
 
 Mock `_container_mounts()` / `_resolve_host_path`, `subprocess.run`, and
 `_get_helper_image`. The test helpers `_demo_app(**overrides)` and
 `_stub_resolve_host_path(mapping)` are available for peer-path tests.
 
-All deterministic Step 1-7 plan items are now covered:
+All deterministic Step 1-8 plan items are now covered:
 
 - Mount resolution items 1-2: tests/test_steward.py:515-583.
 - Peer selection and command shape items 3-9: tests/test_steward.py:1591,
@@ -704,6 +876,25 @@ Key Step 7 tests include `test_run_compose_peer_propagates_resolvable_override`,
 `test_sync_app_self_update_uses_spawn_helper`, and the strengthened
 `test_reconcile_app_synced_drift_auto_self_heals`.
 
+Key Step 8 tests include the implicit-project-env resolver tests at
+tests/test_steward.py:925-1019, the peer command test at :2031, strict
+project-env rejection at :2276, and helper-image ordering coverage at
+:1316-1345. The full suite baseline after Step 8 is 161 passing.
+
+Step 8 must add these pending tests before this section can be marked fully
+complete again:
+
+- Implicit project `.env` separate-source nested bind, same-source no-op, and
+  unresolvable strict failure.
+- End-to-end peer command with the implicit `.env` nested bind and no
+  `--env-file` flag.
+- Regular-app and self-update strict `"project_env"` failures.
+- Missing helper image combined with each strict reason (`override`, explicit
+  `env_file`, implicit `project_env`) proving no direct fallback occurs.
+- Missing helper image with valid paths proving direct fallback still works.
+- Ordering assertion that strict path validation occurs before helper-image
+  lookup.
+
 ---
 
 ## 5. Docs (`README.md`) ✅ DONE
@@ -737,8 +928,8 @@ gitignored `.venv`:
 1. `.venv/bin/ruff check steward.py metrics_server.py tests/`
 2. `.venv/bin/ruff format steward.py metrics_server.py tests/` then
    `.venv/bin/ruff format --check steward.py metrics_server.py tests/`
-3. `.venv/bin/python -m pytest tests/ -q` — **must be ≥ 146 passing** (the
-   Step 0-6 + 7.1-7.3 baseline). Use `-v --tb=short` when something fails.
+3. `.venv/bin/python -m pytest tests/ -q` — **must be ≥ 153 passing** (the
+   complete current implementation baseline). Use `-v --tb=short` when something fails.
 
 Manual, on a node where container ≠ host path (e.g. `infra-1`):
 
@@ -752,7 +943,7 @@ Manual, on a node where container ≠ host path (e.g. `infra-1`):
 
 ---
 
-## 8. Rollout
+## 9. Rollout
 
 This repo has no separate version file to bump. After merge, create the next
 SemVer `v*` tag. CI publishes the image and the `bump-self-image` job
@@ -762,7 +953,7 @@ the `/git` symlink on each node.
 
 ---
 
-## 9. Scope / non-goals
+## 10. Scope / non-goals
 
 **In:** transparent peer compose for all apps; D1 strictness; D2 env forwarding
 with redacted logging; D3 mount-resolution fixes; startup guard; tests; README
@@ -783,7 +974,7 @@ consistent and drift detection will not false-positive.
 
 ---
 
-## 10. Verified context (so you don't have to re-check)
+## 11. Verified context (so you don't have to re-check)
 
 - D2 is a **no-op for self-update in the documented configuration**.
   `AGENT_IMAGE` and `STEWARD_DATA_DIR` are not in steward's container

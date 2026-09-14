@@ -922,6 +922,92 @@ def test_resolve_compose_host_paths_adds_ro_bind_for_env_file_on_separate_mount(
     assert paths.bind_specs.count("/opt/secrets/app.env:/opt/secrets/app.env:ro") == 1
 
 
+def test_resolve_compose_host_paths_preserves_implicit_project_env_mount(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+    project_env = tmp_path / ".env"
+    project_env.write_text("IMAGE_TAG=stable\n")
+    monkeypatch.setattr(steward, "GITOPS_ROOT", Path("/git"))
+    monkeypatch.setattr(
+        steward,
+        "_resolve_host_path",
+        _stub_resolve_host_path(
+            {
+                "/git": "/home/u/git",
+                str(tmp_path): "/home/u/git/stacks/demo",
+                str(compose_file): "/home/u/git/stacks/demo/docker-compose.yml",
+                str(project_env): "/opt/secrets/demo.env",
+            }
+        ),
+    )
+
+    paths, reason = steward._resolve_compose_host_paths(_demo_app(), tmp_path)
+
+    assert reason == ""
+    assert paths is not None
+    assert paths.env_file is None
+    assert paths.bind_specs.count("/opt/secrets/demo.env:/home/u/git/stacks/demo/.env:ro") == 1
+
+
+def test_resolve_compose_host_paths_does_not_bind_implicit_project_env_when_same_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+    project_env = tmp_path / ".env"
+    project_env.write_text("IMAGE_TAG=stable\n")
+    host_workdir = "/home/u/git/stacks/demo"
+    monkeypatch.setattr(steward, "GITOPS_ROOT", Path("/git"))
+    monkeypatch.setattr(
+        steward,
+        "_resolve_host_path",
+        _stub_resolve_host_path(
+            {
+                "/git": "/home/u/git",
+                str(tmp_path): host_workdir,
+                str(compose_file): f"{host_workdir}/docker-compose.yml",
+                str(project_env): f"{host_workdir}/.env",
+            }
+        ),
+    )
+
+    paths, reason = steward._resolve_compose_host_paths(_demo_app(), tmp_path)
+
+    assert reason == ""
+    assert paths is not None
+    assert paths.env_file is None
+    assert not any(spec.endswith(":/home/u/git/stacks/demo/.env:ro") for spec in paths.bind_specs)
+
+
+def test_resolve_compose_host_paths_rejects_unresolvable_implicit_project_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+    project_env = tmp_path / ".env"
+    project_env.write_text("IMAGE_TAG=stable\n")
+    monkeypatch.setattr(steward, "GITOPS_ROOT", Path("/git"))
+    monkeypatch.setattr(
+        steward,
+        "_resolve_host_path",
+        _stub_resolve_host_path(
+            {
+                "/git": "/home/u/git",
+                str(tmp_path): "/home/u/git/stacks/demo",
+                str(compose_file): "/home/u/git/stacks/demo/docker-compose.yml",
+                # project_env deliberately absent
+            }
+        ),
+    )
+
+    paths, reason = steward._resolve_compose_host_paths(_demo_app(), tmp_path)
+
+    assert paths is None
+    assert reason == "project_env"
+
+
 def test_resolve_compose_host_paths_no_redundant_ro_bind_for_file_under_root(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1205,6 +1291,7 @@ def test_spawn_compose_helper_falls_back_when_helper_image_missing(
     app = _demo_app(name="steward")
 
     monkeypatch.setattr(steward, "_get_helper_image", lambda: None)
+    monkeypatch.setattr(steward, "_resolve_host_path", lambda path: str(path))
     monkeypatch.setattr(steward, "host_path", lambda _path: "<host path>")
 
     seen: dict = {}
@@ -1223,6 +1310,26 @@ def test_spawn_compose_helper_falls_back_when_helper_image_missing(
     assert "-d" in seen["cmd"]
     assert "run" not in seen["cmd"]
     assert seen["kwargs"]["timeout"] == 300
+
+
+@pytest.mark.parametrize("reason", ["override", "env_file", "project_env"])
+def test_spawn_compose_helper_validates_strict_paths_before_helper_image(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+) -> None:
+    app = _demo_app(name="steward")
+    monkeypatch.setattr(
+        steward,
+        "_resolve_compose_host_paths",
+        lambda *_args: (None, reason),
+    )
+
+    def _unexpected_image_lookup():
+        raise AssertionError("helper image lookup must follow strict path validation")
+
+    monkeypatch.setattr(steward, "_get_helper_image", _unexpected_image_lookup)
+
+    assert steward.spawn_compose_helper(app, Path("/git/stacks/steward")) is False
 
 
 def test_spawn_compose_helper_falls_back_when_host_path_lookup_fails(
@@ -1921,6 +2028,46 @@ def test_run_compose_peer_propagates_resolvable_override(
     )
 
 
+def test_run_compose_peer_preserves_implicit_project_env_without_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+    project_env = tmp_path / ".env"
+    project_env.write_text("IMAGE_TAG=stable\n")
+    monkeypatch.setattr(steward, "GITOPS_ROOT", Path("/git"))
+    monkeypatch.setattr(
+        steward,
+        "_resolve_host_path",
+        _stub_resolve_host_path(
+            {
+                "/git": "/home/u/git",
+                str(tmp_path): "/home/u/git/stacks/demo",
+                str(compose_file): "/home/u/git/stacks/demo/docker-compose.yml",
+                str(project_env): "/opt/secrets/demo.env",
+            }
+        ),
+    )
+    monkeypatch.setattr(steward, "host_path", lambda _path: "<host path>")
+    monkeypatch.setattr(steward, "_get_helper_image", lambda: "ghcr.io/test/steward:latest")
+
+    seen: dict = {}
+
+    def _fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(steward.subprocess, "run", _fake_run)
+
+    result = steward.run_compose(_demo_app(), tmp_path)
+
+    assert result is True
+    assert "/opt/secrets/demo.env:/home/u/git/stacks/demo/.env:ro" in seen["cmd"]
+    assert "--env-file" not in seen["cmd"][-1]
+
+
 @pytest.mark.parametrize("error", ["timeout", "not_found"])
 def test_run_compose_direct_handles_subprocess_errors(
     monkeypatch: pytest.MonkeyPatch,
@@ -2122,6 +2269,41 @@ def test_run_compose_peer_rejects_unresolvable_env_file_without_fallback(
     )
 
     result = steward.run_compose(_demo_app(env_file=str(env_file)), tmp_path)
+
+    assert result is False
+
+
+def test_run_compose_peer_rejects_unresolvable_project_env_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose_file = tmp_path / "docker-compose.yml"
+    compose_file.write_text("services: {}\n")
+    project_env = tmp_path / ".env"
+    project_env.write_text("IMAGE_TAG=stable\n")
+    monkeypatch.setattr(steward, "GITOPS_ROOT", Path("/git"))
+    monkeypatch.setattr(
+        steward,
+        "_resolve_host_path",
+        _stub_resolve_host_path(
+            {
+                "/git": "/home/u/git",
+                str(tmp_path): "/home/u/git/stacks/demo",
+                str(compose_file): "/home/u/git/stacks/demo/docker-compose.yml",
+                # project_env deliberately absent
+            }
+        ),
+    )
+    monkeypatch.setattr(steward, "host_path", lambda _path: "<host path>")
+    monkeypatch.setattr(
+        steward,
+        "_run_peer_compose",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("peer compose must not run")
+        ),
+    )
+
+    result = steward.run_compose(_demo_app(), tmp_path)
 
     assert result is False
 
