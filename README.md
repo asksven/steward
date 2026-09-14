@@ -187,7 +187,7 @@ ref:
   # tag: v1.2.3                         # pin to a specific release
 path: .                                 # path within repo to compose file, default: .
 compose_file: docker-compose.yml        # compose filename, default: docker-compose.yml
-compose_env_file: /git/stacks/arr/.env  # container-internal path; see note above
+compose_env_file: /git/stacks/arr/.env  # container path; must be host-resolvable for peer Compose
 sync_policy: auto                       # optional: auto (default) or manual
 pull_policy: always                     # optional: always (default), missing, never
 health_check_delay_seconds: 30          # optional: delay before compose health check
@@ -200,6 +200,7 @@ Compatibility notes:
 - v1 manifests are still accepted.
 - `env_file` still works but is deprecated; steward logs a warning and you should migrate to `compose_env_file`.
 - `compose_env_file` and `env_file` cannot be set together.
+- `compose_env_file` must point to a file that is bind-mounted into the steward container, so Docker inspection can resolve its host path when peer Compose is used. A file that exists only inside the container is a reconcile failure, not silently omitted.
 
 ### Validation rules
 
@@ -268,7 +269,13 @@ docker run --rm -d \
 
 The helper is a peer container, independent of steward's process. When Docker Compose stops steward, the helper is unaffected and creates the new container cleanly. The 5-second delay lets the old container exit fully before `compose up` runs.
 
-If host paths cannot be resolved (e.g. `AGENT_CONTAINER_NAME` is wrong or docker inspect fails), steward falls back to calling `docker compose --project-name <app.name> up -d` directly — which will kill itself, but `restart: unless-stopped` ensures the container comes back up on the next Docker restart cycle.
+The same peer-container mechanism is also used for **regular managed apps** whenever the app's container path differs from its host path. Steward passes host-side compose file paths and mounts the host project directory into the peer, so relative bind sources such as `./config:/etc/app/config:ro` are resolved by Compose against the real host directory instead of the steward container's `/git` path. More-specific app/workdir mounts are considered as well.
+
+Compose's implicit project `.env` behavior is preserved as well. If that file is supplied through a separate or more-specific mount, steward binds the resolved host source to the peer's expected `<project-directory>/.env` path rather than converting it to an explicit `--env-file` option.
+
+The startup path-mode guard logs whether direct Compose or the peer helper is being used. `AGENT_CONTAINER_NAME` must match the actual steward container name so Docker inspection can resolve the mount map. If inspection cannot resolve the root, steward continues with a direct compatibility path, but relative bind mounts cannot be guaranteed in that mode. Self-update also uses a direct fallback when a peer helper cannot be prepared; this fallback may terminate the current steward container, after which `restart: unless-stopped` brings it back.
+
+Node-local `docker-compose.override.yml` files and configured `compose_env_file` files are never silently dropped when their host paths cannot be resolved. Steward fails that app reconcile instead of applying a different stack definition.
 
 ### Bootstrap
 
@@ -338,7 +345,7 @@ docker logs -f steward
 
 All output (cron + steward) is forwarded to the container's stdout via `/proc/1/fd/1`.
 
-Set `LOGLEVEL=DEBUG` in your `.env` to enable verbose path diagnostics. At DEBUG level, steward logs both the container-internal path and the corresponding host path for every file it touches (repos, compose files, env files), plus a full mount map at startup. This is useful for diagnosing `env_file` or repo path mismatches:
+Set `LOGLEVEL=DEBUG` in your `.env` to enable verbose path diagnostics. At DEBUG level, steward logs both the container-internal path and the corresponding host path for every file it touches (repos, compose files, env files), the compose path mode, and a full mount map at startup. The peer helper command is logged with forwarded environment values redacted: `-e` key names are shown, but their values are never logged. This is useful for diagnosing `env_file` or repo path mismatches without exposing secrets:
 
 ```env
 LOGLEVEL=DEBUG
