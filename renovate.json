@@ -1,0 +1,26 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "schedule": "at any time",
+    "groupName": null,
+    "labels": ["security"],
+    "commitMessagePrefix": "[SECURITY]"
+  },
+  "excludePaths": ["docker-compose.yml"],
+  "packageRules": [
+    {
+      "matchManagers": ["dockerfile"],
+      "schedule": "every friday",
+      "groupName": "Docker images weekly",
+      "groupSlug": "docker-images-weekly"
+    },
+    {
+      "matchManagers": ["pip_requirements"],
+      "schedule": "every friday",
+      "groupName": "Pip weekly",
+      "groupSlug": "pip-weekly"
+    }
+  ]
+}
