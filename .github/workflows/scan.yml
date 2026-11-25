@@ -17,12 +17,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # On a PR, build the image from this branch's Dockerfile and scan THAT.
+      # On a PR, build the image from this branch's Dockerfile and scan THAT;
+      # on the schedule, scan the latest published image.
       - name: Set scan target
         id: target
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "image=docker://asksven/steward:pr-scan" >> "$GITHUB_OUTPUT"
+            echo "image=asksven/steward:pr-scan" >> "$GITHUB_OUTPUT"
           else
             echo "image=ghcr.io/asksven/steward:latest" >> "$GITHUB_OUTPUT"
           fi
@@ -32,6 +33,7 @@ jobs:
         run: docker build -f Dockerfile -t asksven/steward:pr-scan .
 
       - name: Scan image (grype)
+        id: scan
         uses: anchore/scan-action@v7
         with:
           image: ${{ steps.target.outputs.image }}
@@ -39,11 +41,10 @@ jobs:
           # Fail when a finding is high or critical ("over medium");
           # medium and below only warn.
           severity-cutoff: high
-          acs-report-enable: true
 
-      - name: Upload grype report
-        uses: actions/upload-artifact@v4
+      - name: Upload grype SARIF report
         if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: grype-reports
-          path: ${{ github.workspace }}/grype-reports/*
+          name: grype-report
+          path: ${{ steps.scan.outputs.sarif }}
