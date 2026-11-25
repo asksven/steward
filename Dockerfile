@@ -2,9 +2,10 @@ FROM docker.io/asksven/python-dev:v3.14.8
 
 ARG UV_VERSION=0.8.4
 
-# The Chainguard -dev image defaults to a non-root UID (65532); steward needs
-# root at build (apk add) and at runtime (entrypoint writes /etc/passwd, installs
-# crontab to /etc/cron, chmods, and drops to root by default with STEWARD_UID=0).
+# steward must run as root: its entrypoint writes /etc/passwd for arbitrary host
+# UIDs, installs crontab to /etc/cron, chmods, and drops to root by default
+# (STEWARD_UID=0). The Chainguard -dev image defaults to non-root UID 65532.
+# hadolint ignore=DL3002
 USER root
 
 # Install system dependencies (wolfi/apk). Note: docker-compose is the package
