@@ -1,12 +1,18 @@
-FROM python:3.14-alpine
+FROM docker.io/asksven/python-dev:v3.14.8
 
 ARG UV_VERSION=0.8.4
 
-# Install system dependencies
+# The Chainguard -dev image defaults to a non-root UID (65532); steward needs
+# root at build (apk add) and at runtime (entrypoint writes /etc/passwd, installs
+# crontab to /etc/cron, chmods, and drops to root by default with STEWARD_UID=0).
+USER root
+
+# Install system dependencies (wolfi/apk). Note: docker-compose is the package
+# name in the wolfi base - the upstream `docker-cli-compose` does not exist there.
 RUN apk add --no-cache \
     git=~2 \
     docker-cli=~29 \
-    docker-cli-compose=~5 \
+    docker-compose=~5 \
     openssh-client=~10 \
     su-exec=~0.3 && \
     pip install --no-cache-dir "uv==${UV_VERSION}"
