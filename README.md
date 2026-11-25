@@ -131,7 +131,7 @@ non-zero if any check fails.
 
 If your control repo and app repos are on different git hosts and need separate keys, use `credentials.yml` to map each host to its secret.
 
-**1. Create `credentials.yml`** on the host (e.g. `/etc/steward/credentials.yml`):
+**1. Copy `credentials.yml.example`** (committed in this repo) to `credentials.yml` on the host (e.g. `/etc/steward/credentials.yml`) and adjust the `key_file` paths:
 
 ```yaml
 credentials:
@@ -148,6 +148,8 @@ known_hosts_file: /run/secrets/ssh_known_hosts
 **2. Edit `docker-compose.override.yml`** — uncomment Option B in the file (or use the commented block in `docker-compose.override.yml.example` as reference).
 
 When `credentials.yml` is present, steward uses it and ignores the single-key `ssh_key` secret.
+
+> GitHub has no per-repo deploy keys - an SSH key added to a GitHub account is account-level and can access every repo that account can reach. Keep any GitHub key you add dedicated to steward and least-privilege.
 
 ---
 
