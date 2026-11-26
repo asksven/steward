@@ -1,0 +1,46 @@
+name: Container vulnerability scan (grype)
+
+on:
+  pull_request:
+  schedule:
+    - cron: '0 0 * * *'      # every 24 hours (00:00 UTC)
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # On a PR, build the image from this branch's Dockerfile and scan THAT;
+      # on the schedule, scan the latest published image.
+      - name: Set scan target
+        id: target
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "image=asksven/steward:pr-scan" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=ghcr.io/asksven/steward:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build image (PR)
+        if: github.event_name == 'pull_request'
+        run: docker build -f Dockerfile -t asksven/steward:pr-scan .
+
+      - name: Scan image (grype)
+        id: scan
+        uses: anchore/scan-action@v7
+        with:
+          image: ${{ steps.target.outputs.image }}
+          fail-build: true
+          # Fail when a finding is high or critical ("over medium");
+          # medium and below only warn.
+          severity-cutoff: high
+          # Table format prints every finding (CVE/GHSA, severity, package)
+          # directly into this step's log.
+          output-format: table
