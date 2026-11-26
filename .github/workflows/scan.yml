@@ -41,10 +41,6 @@ jobs:
           # Fail when a finding is high or critical ("over medium");
           # medium and below only warn.
           severity-cutoff: high
-
-      - name: Upload grype SARIF report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: grype-report
-          path: ${{ steps.scan.outputs.sarif }}
+          # Table format prints every finding (CVE/GHSA, severity, package)
+          # directly into this step's log.
+          output-format: table
