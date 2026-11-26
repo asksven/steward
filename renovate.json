@@ -11,6 +11,10 @@
   "ignorePaths": ["docker-compose.yml"],
   "packageRules": [
     {
+      "matchPackageNames": ["asksven/python-dev", "docker.io/asksven/python-dev"],
+      "versioning": "regex:^v?(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)(?:-(?<build>\\d+))?$"
+    },
+    {
       "matchManagers": ["dockerfile"],
       "schedule": "every friday",
       "groupName": "Docker images weekly",
