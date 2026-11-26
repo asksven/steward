@@ -8,7 +8,7 @@
     "labels": ["security"],
     "commitMessagePrefix": "[SECURITY]"
   },
-  "excludePaths": ["docker-compose.yml"],
+  "ignorePaths": ["docker-compose.yml"],
   "packageRules": [
     {
       "matchPackageNames": ["asksven/python-dev", "docker.io/asksven/python-dev"],
