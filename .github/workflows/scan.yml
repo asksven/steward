@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # On a PR, build the image from this branch's Dockerfile and scan THAT;
       # on the schedule, scan the latest published image.
