@@ -1,4 +1,4 @@
-FROM docker.io/asksven/python-dev:v3.14.8
+FROM docker.io/asksven/python-dev:v3.15.2
 
 ARG UV_VERSION=0.8.4
 
